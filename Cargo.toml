@@ -44,6 +44,12 @@ uniffi = "=0.32.2"
 # trust. No bundled root store, so a corporate or system trust setting is honoured.
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Claude Desktop's cookies, decrypted only for live usage a person turned on. ring is
+# already here for TLS and gives PBKDF2; AES-128 itself is the RustCrypto block cipher,
+# with CBC written out beside it. zeroize wipes the key and the session once read.
+ring = { version = "0.17", default-features = false }
+aes = { version = "0.8", features = ["zeroize"] }
+zeroize = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

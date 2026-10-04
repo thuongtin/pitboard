@@ -205,6 +205,10 @@ struct AccountsPane: View {
             givingUp = true
         case .dismissAbandoned:
             model.forgetAbandoned()
+        case .allowLiveUsage:
+            model.liveUsageAsked()
+        case .finishDesktopAdd:
+            model.finishDesktopAddAsked()
         }
     }
 
@@ -250,7 +254,7 @@ private struct SetupTip: View {
             Tip(
                 symbol: "tag",
                 title: "Give this account a name",
-                detail: "\(email) is signed in\(to(provider)). pitboard parks logins "
+                detail: "\(whoIsSignedIn(email)) is signed in\(to(provider)). pitboard parks logins "
                     + "under a name you choose, and can’t park this one until it has one."
             ) {
                 Button("Name…") { model.present(.name(provider: provider, email: email)) }

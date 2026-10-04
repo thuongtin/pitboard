@@ -141,8 +141,12 @@ struct AccountDescription: Equatable {
     /// Why its numbers are not new, when they are not and it can be used all the same: its
     /// service could not be reached or is rate limiting, or its session has expired.
     let staleNote: String?
-    /// How long the parked login stays usable, for an account not in use.
+    /// How long the parked login stays usable, for an account not in use. For Claude
+    /// Desktop, when its sign-in lapses: pitboard cannot renew one.
     let parkedNote: String?
+    /// Where the numbers came from, when that is not the account's service: Claude
+    /// Desktop's own history, called unconfirmed only while the reading is not verified.
+    let sourceNote: String?
     /// How long the account in use lasts at the rate it is going.
     let pace: String?
     let limits: [Limits]
@@ -159,7 +163,7 @@ struct AccountDescription: Equatable {
         if account.unplaced {
             title = "Login pitboard can’t use"
         } else {
-            title = account.label ?? account.email
+            title = accountName(label: account.label, email: account.email)
         }
         // A switch running holds everything back, since each change waits for the one
         // before. A sign-in running holds back only another sign-in: it waits on a person in
@@ -181,7 +185,17 @@ struct AccountDescription: Equatable {
             account.unplaced || !account.switchable && !account.signedIn
             ? account.staleExplanation : nil
         staleNote = problem == nil ? account.staleExplanation : nil
-        parkedNote = account.signedIn ? nil : parkedLife(account.parked, now: now)
+        parkedNote =
+            account.signedIn
+            ? nil
+            : account.provider == desktopProvider
+                ? desktopLapseNote(account.parked, now: now)
+                : parkedLife(account.parked, now: now)
+        sourceNote = account.usage.flatMap { usage in
+            guard usage.source == .desktopHistory else { return nil }
+            return usage.verified
+                ? "From Claude’s history" : "From Claude’s history, unconfirmed"
+        }
         pace = account.lastsSeconds.map {
             lasting($0, burning: account.lastsBurning).capitalizedFirst
         }

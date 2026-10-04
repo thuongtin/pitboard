@@ -1,6 +1,7 @@
 import Foundation
-import PitboardKit
 import Testing
+
+@testable import PitboardKit
 
 /// A scratch home whose Claude Code and Codex directories are its own, so the credential
 /// slot read is hashed from it and never the machine's real login, and the Codex login read
@@ -14,6 +15,10 @@ private struct ScratchHome {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
+    /// A Claude app of its own, which is not there unless `desktop` makes one, so nothing
+    /// looks in /Applications.
+    var desktopApp: String { root.appendingPathComponent("Claude.app").path }
+
     func settings(codex: String? = nil, schedules: String? = nil) -> Settings {
         Settings(
             home: root.path,
@@ -24,7 +29,9 @@ private struct ScratchHome {
             claudeProgram: nil,
             codexHome: root.appendingPathComponent("codex").path,
             codexProgram: codex,
-            scheduleProgram: schedules
+            scheduleProgram: schedules,
+            desktopDir: root.appendingPathComponent("claude-desktop").path,
+            desktopApp: desktopApp
         )
     }
 
@@ -62,10 +69,39 @@ private struct ScratchHome {
         withCodex.remove()
     }
     let neither = PitboardService(settings: bare.settings())
-    #expect(neither.tools().map(\.code) == ["claude", "codex"])
+    #expect(neither.tools().map(\.code) == ["claude", "codex", "desktop"])
     #expect(await neither.installed().isEmpty)
     let codex = PitboardService(settings: withCodex.settings(codex: "/nowhere/codex"))
     #expect(await codex.installed().map(\.code) == ["codex"])
+}
+
+/// Claude Desktop is installed where its app has its program, which is looked for in the
+/// app named outright and never asks a login shell.
+@Test func claudeDesktopIsInstalledWhereItsAppIs() async throws {
+    let home = try ScratchHome()
+    defer { home.remove() }
+    let program = URL(fileURLWithPath: home.desktopApp).appendingPathComponent(
+        "Contents/MacOS/Claude")
+    try FileManager.default.createDirectory(
+        at: program.deletingLastPathComponent(), withIntermediateDirectories: true)
+    FileManager.default.createFile(
+        atPath: program.path, contents: Data("#!/bin/sh\n".utf8),
+        attributes: [.posixPermissions: 0o755])
+    let service = PitboardService(settings: home.settings())
+    #expect(await service.installed().map(\.code) == ["desktop"])
+}
+
+/// The Claude app and its data are read from the variables the command line reads, so the
+/// two look at the same Claude.
+@Test func theDesktopVariablesAreRead() {
+    let settings = Settings.forCurrentUser(
+        environment: [
+            "HOME": "/scratch", "PITBOARD_CLAUDE_DESKTOP_DIR": "/scratch/support",
+            "PITBOARD_CLAUDE_DESKTOP_APP": "/scratch/Claude.app",
+        ],
+        loginPath: nil, bundle: nil, isExecutable: { _ in false })
+    #expect(settings.desktopDir == "/scratch/support")
+    #expect(settings.desktopApp == "/scratch/Claude.app")
 }
 
 /// Counts how often the settings were asked for, and whether any ask was on the main
@@ -101,7 +137,7 @@ private final class Asks: @unchecked Sendable {
         asks.note()
         return settings
     }
-    #expect(service.tools().count == 2, "listing the tools asks nothing")
+    #expect(service.tools().count == 3, "listing the tools asks nothing")
     #expect(asks.count == 0)
     async let installed = service.installed()
     async let changed = service.changedAt()
