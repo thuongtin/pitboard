@@ -5,13 +5,14 @@ mod file;
 mod keychain;
 #[cfg(any(test, feature = "test-support"))]
 pub mod memory;
+pub(crate) mod tree;
 #[cfg(not(target_os = "macos"))]
 mod vault;
 
 use crate::context::Context;
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The only program trusted to read Claude Code's keychain item. Named here so the backend
 /// that runs it and the doctor check that looks for it cannot drift apart.
@@ -164,6 +165,40 @@ pub(crate) trait Host: Send + Sync + std::fmt::Debug {
     /// that can be told.
     fn processes(&self, program: &str) -> Option<Vec<crate::process::Process>> {
         crate::process::processes(program)
+    }
+
+    /// The processes this user is running from inside `bundle`, as
+    /// [`crate::process::processes_within`] tells them.
+    fn processes_within(
+        &self,
+        bundle: crate::process::Bundle<'_>,
+        excluded: &[&str],
+    ) -> Option<Vec<crate::process::Process>> {
+        crate::process::processes_within(bundle, excluded)
+    }
+
+    /// Whether process `pid` may be running.
+    fn pid_alive(&self, pid: u32) -> bool {
+        crate::process::pid_alive(pid)
+    }
+
+    /// The program process `pid` runs, where that can be told.
+    fn program_of(&self, pid: u32) -> Option<PathBuf> {
+        crate::process::program_of(pid)
+    }
+
+    /// The device the file at `path` is on, so two places can be told to share a volume.
+    fn device_of(&self, path: &Path) -> std::io::Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).map(|m| m.dev())
+    }
+
+    /// What Chromium's cookie database at `path` holds for claude.ai, read without a lock.
+    fn cookie_table(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<crate::provider::desktop::types::CookieTable> {
+        crate::provider::desktop::cookies::read_with_sqlite(path)
     }
 }
 

@@ -33,6 +33,17 @@ private func renewed(_ outcome: String) -> Renewed {
     #expect(renewalNote([renewed("expired")]) == "1 due; none could be renewed this time.")
 }
 
+/// A Claude Desktop login is never renewed by pitboard, so a run lists each of its parks as
+/// `not_renewable`. That is how they are, not something that was due and failed, so they
+/// are left out of the count rather than read as a renewal that went wrong.
+@Test func aLoginThatIsNeverRenewedIsNeitherDueNorFailed() {
+    #expect(renewalNote([renewed("not_renewable")]) == "Nothing was due.")
+    #expect(renewalNote([renewed("renewed"), renewed("not_renewable")]) == "Renewed one.")
+    #expect(
+        renewalNote([renewed("expired"), renewed("not_renewable")])
+            == "1 due; none could be renewed this time.")
+}
+
 /// A `pitboard` installed apart from the app is updated the way it was installed, and none
 /// of those ways does it by itself. Saying it "updates on its own" read as though nothing
 /// needed doing, until the app moved on and the command line refused its newer files.
@@ -115,4 +126,14 @@ private func renewed(_ outcome: String) -> Renewed {
 @Test func aTypedLabelIsTakenApart() {
     #expect(split("codex/work") == ("codex", "work"))
     #expect(split("work") == ("claude", "work"))
+}
+
+/// A Claude Desktop account has no email, so a sentence that would start with one starts
+/// with words instead, and an account with neither label nor email is not titled by nothing.
+@Test func anAccountWithNoEmailIsNeverNamedByNothing() {
+    #expect(whoIsSignedIn("") == "An account")
+    #expect(whoIsSignedIn("a@example.com") == "a@example.com")
+    #expect(accountName(label: "work", email: "") == "work")
+    #expect(accountName(label: nil, email: "a@example.com") == "a@example.com")
+    #expect(accountName(label: nil, email: "") == "Unnamed account")
 }

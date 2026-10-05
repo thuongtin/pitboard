@@ -18,7 +18,7 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: $tab) {
-            GeneralSettings(machine: model.machine)
+            GeneralSettings(model: model, machine: model.machine)
                 .tabItem { Label("General", systemImage: Symbol.general) }
                 .tag(Tab.general)
             CommandLineSettings(machine: model.machine)
@@ -37,6 +37,7 @@ struct SettingsView: View {
 }
 
 private struct GeneralSettings: View {
+    let model: AppModel
     let machine: MachineModel
     @AppStorage(DefaultsKey.menuBarShows) private var shows = MenuBarShows.nameAndUsage
 
@@ -120,6 +121,10 @@ private struct GeneralSettings: View {
                 )
                 .footnote()
             }
+
+            if model.desktopShown {
+                DesktopSettings(model: model)
+            }
         }
         .formStyle(.grouped)
         .task {
@@ -132,6 +137,53 @@ private struct GeneralSettings: View {
             {
                 machine.readLoginItem()
             }
+        }
+    }
+}
+
+/// Where Claude Desktop's numbers come from. Turning live usage on only shows the sheet that
+/// explains the keychain's prompt; its Continue is what turns it on.
+private struct DesktopSettings: View {
+    let model: AppModel
+
+    private var state: LiveUsageState {
+        model.liveUsage
+            ?? LiveUsageState(enabled: false, approval: "unknown", reason: nil, lastOkAt: nil)
+    }
+
+    var body: some View {
+        Section {
+            Toggle(
+                "Show live usage",
+                isOn: Binding(
+                    get: { state.enabled },
+                    set: { wanted in
+                        if wanted {
+                            model.liveUsageAsked()
+                        } else {
+                            Task { model.present(await model.liveUsageDisable()) }
+                        }
+                    })
+            )
+            .accessibilityIdentifier("settings.liveUsage")
+            if state.enabled, state.approval == "needs_approval" {
+                LabeledContent {
+                    Button("Allow Again…") { model.liveUsageAsked() }
+                } label: {
+                    Text(liveUsageLine(state)).explanatory()
+                }
+            } else {
+                Text(liveUsageLine(state)).explanatory()
+            }
+        } header: {
+            Text("Claude Desktop")
+        } footer: {
+            Text(
+                "Live usage asks claude.ai how much each Claude Desktop account has left, "
+                    + "which takes reading a key Claude keeps in your login keychain. "
+                    + "Switching accounts never reads it."
+            )
+            .footnote()
         }
     }
 }

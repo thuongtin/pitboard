@@ -7,4 +7,8 @@ enum DefaultsKey {
     static let secondAccountDeclined = "secondAccountDeclined"
     /// What the menu bar item shows.
     static let menuBarShows = "menuBarShows"
+    /// Whether the notification that macOS stopped pitboard reading Claude's key has been
+    /// sent since live usage last worked, so it is sent once and not at every read, and not
+    /// again by an app opened anew.
+    static let liveUsagePauseTold = "liveUsagePauseTold"
 }

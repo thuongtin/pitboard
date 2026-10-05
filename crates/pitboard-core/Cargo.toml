@@ -27,6 +27,9 @@ machine-uid.workspace = true
 libc.workspace = true
 ureq.workspace = true
 rustls.workspace = true
+ring.workspace = true
+aes.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

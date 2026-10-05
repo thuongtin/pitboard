@@ -15,7 +15,7 @@ struct NameSheet: View {
     var body: some View {
         SheetLayout(
             title: "Name This Account",
-            message: "\(email) is signed in to \(model.tool(provider)?.name ?? provider). "
+            message: "\(whoIsSignedIn(email)) is signed in to \(model.tool(provider)?.name ?? provider). "
                 + "pitboard parks its login under this name whenever you switch to another "
                 + "account."
         ) {

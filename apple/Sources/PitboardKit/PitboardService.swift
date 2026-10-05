@@ -59,6 +59,20 @@ public protocol Core: Sendable {
     /// as the app looks in it. Nil when the shell could not be asked. Asked the same way and
     /// as rarely as `installed`, and for the same reason.
     func searchPath() async -> String?
+    /// Puts the account the tool is signed in to aside, as a switch would, and leaves the
+    /// tool signed out so the person can sign in to another one there. Only Claude Desktop
+    /// does this, and only while it is not running; the tool is a `Tool`'s code.
+    func switchToSignedOut(_ provider: String) async throws -> Switched
+    /// The Claude Desktop account put aside for a sign-in that has not been enrolled yet,
+    /// or nil. Read from pitboard's own files, so it answers at once.
+    func awaitingSignIn() async -> Awaiting?
+    /// Whether live usage for Claude Desktop is on, and whether macOS lets pitboard read
+    /// what it needs. Never asks the keychain: it reports what the last reading found.
+    func liveUsage() async -> LiveUsageState
+    /// Turns live usage on. The only call that may lead macOS to ask the person about the
+    /// keychain, so the app makes it only from the sheet that says so.
+    func enableLiveUsage() async throws -> LiveUsageState
+    func disableLiveUsage() async throws -> LiveUsageState
 }
 
 /// pitboard's core, called off the main thread. Any call may wait on the keychain, a lock or
@@ -113,7 +127,8 @@ public final class PitboardService: Core, Sendable {
                 core: Pitboard(settings: settings),
                 found: Set(
                     [("claude", settings.claudeProgram), ("codex", settings.codexProgram)]
-                        .compactMap { code, program in program == nil ? nil : code }),
+                        .compactMap { code, program in program == nil ? nil : code }
+                        + (claudeDesktopFound(settings) ? ["desktop"] : [])),
                 searchPath: settings.searchPath)
             return (made, late)
         }
@@ -236,6 +251,27 @@ public final class PitboardService: Core, Sendable {
         }
     }
 
+    public func switchToSignedOut(_ provider: String) async throws -> Switched {
+        try await run(on: changes) { try $0.switchToSignedOut(tool: provider) }
+    }
+
+    public func awaitingSignIn() async -> Awaiting? {
+        (try? await run(on: reads) { $0.awaitingSignIn() }) ?? nil
+    }
+
+    public func liveUsage() async -> LiveUsageState {
+        (try? await run(on: reads) { $0.liveUsage() })
+            ?? LiveUsageState(enabled: false, approval: "unknown", reason: nil, lastOkAt: nil)
+    }
+
+    public func enableLiveUsage() async throws -> LiveUsageState {
+        try await run(on: changes) { try $0.enableLiveUsage() }
+    }
+
+    public func disableLiveUsage() async throws -> LiveUsageState {
+        try await run(on: changes) { try $0.disableLiveUsage() }
+    }
+
     private func run<T: Sendable>(
         on queue: DispatchQueue,
         _ work: @escaping @Sendable (Pitboard) throws -> T
@@ -245,6 +281,15 @@ public final class PitboardService: Core, Sendable {
             queue.async { continuation.resume(with: Result { try work(made.value().core) }) }
         }
     }
+}
+
+/// Whether the Claude app is where `settings` says, or in /Applications when it says
+/// nothing. Its program is looked for inside the app, and no login shell is asked: the app
+/// is never on a `PATH`.
+private func claudeDesktopFound(_ settings: Settings) -> Bool {
+    let app =
+        settings.desktopApp.flatMap { $0.isEmpty ? nil : $0 } ?? "/Applications/Claude.app"
+    return FileManager.default.isExecutableFile(atPath: "\(app)/Contents/MacOS/Claude")
 }
 
 /// A value made the first time it is asked for, by whichever thread asks first. Any other
@@ -360,7 +405,9 @@ extension Settings {
             codexProgram: find("codex", unless: "PITBOARD_CODEX"),
             searchPath: loginPath.map { _ in shell.joined(separator: ":") },
             scheduleProgram: bundle.flatMap(bundledCommandLine(in:)),
-            noArgv: environment["PITBOARD_NO_ARGV"] == "1"
+            noArgv: environment["PITBOARD_NO_ARGV"] == "1",
+            desktopDir: environment["PITBOARD_CLAUDE_DESKTOP_DIR"],
+            desktopApp: environment["PITBOARD_CLAUDE_DESKTOP_APP"]
         )
     }
 

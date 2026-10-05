@@ -3,13 +3,15 @@ title: "Security and privacy"
 description: "pitboard keeps parked logins on your machine, sends them only to the service that issued them, and has no telemetry."
 ---
 
-pitboard handles the OAuth refresh tokens of Claude Code and OpenAI's Codex CLI, which grant full access to a paid account. For the full policy, see [SECURITY.md](https://github.com/datlechin/pitboard/blob/main/SECURITY.md).
+pitboard handles the OAuth refresh tokens of Claude Code and OpenAI's Codex CLI, and Claude Desktop's session, which grant full access to a paid account. For the full policy, see [SECURITY.md](https://github.com/datlechin/pitboard/blob/main/SECURITY.md).
 
 ## Where parked logins are kept
 
 On macOS, parked logins are keychain items whose names start with `pitboard-park-`. pitboard reads and writes them, and Claude Code's own item, only through `/usr/bin/security`, the one program that item trusts. Writing an item through the Security framework would slow every later read of it from 0.01 seconds to about a second, for good.
 
 A Claude Code parked login holds the account's OAuth block, plus any `organizationUuid`, `trustedDeviceToken`, `enterpriseGateway` or `designOauth` stored beside it. Whether restoring a device token spares a re-verification has not been measured. A Codex parked login is Codex's whole login file, `~/.codex/auth.json`.
+
+A Claude Desktop parked login is a folder in `~/.pitboard/desktop/parks/`, at mode 0700. It holds Claude's cookie jar, its storage folders and the three keys of its `config.json` that pitboard moves with the account, which on 4 October 2026 were enough to move each of two accounts whole. The session cookie stays encrypted with Claude's key, as it was in Claude's data folder. pitboard moves these files by rename, so no copy stays behind.
 
 On Linux, parked logins are files in `~/.pitboard/vault/`, at mode 0600 in a 0700 directory. Any process running as you can read them, as it can the login in use, which each tool keeps in a file at mode 0600.
 
@@ -28,11 +30,20 @@ pitboard makes only these requests. It has no server of its own and no telemetry
 | `platform.claude.com/v1/oauth/token` | A refresh token and the login's client id, or Claude Code's if it has none | Renewing a Claude Code parked login |
 | `chatgpt.com/backend-api/wham/usage` | An access token and the ChatGPT account id | What a Codex account has left, and whether OpenAI still accepts a login pitboard is about to switch to. It counts against no limit. |
 | `auth.openai.com/oauth/token` | A refresh token and Codex's public client id | Renewing a Codex parked login |
+| `claude.ai/api/organizations/<org>/usage` | Claude Desktop's `sessionKey` cookie | What a Claude Desktop account has left, only while live usage is on. claude.ai does not document this request; its answer was measured on 4 October 2026. |
 | `github.com/datlechin/pitboard/releases` | Nothing of yours | The app's update check (`appcast.xml`) and update downloads, only in a copy of the app from a release. It checks once a day while **Check for updates automatically** is on, and when you choose **Check for Updates** or click **Check Now**. The command line never checks. |
 
-pitboard never renews a login a tool is using. Each renewal is the request the tool itself makes to renew its own login. Until you enrol a Codex account, pitboard sends OpenAI nothing.
+pitboard never renews a login a tool is using. Each renewal is the request the tool itself makes to renew its own login. Until you enrol a Codex account, pitboard sends OpenAI nothing. Until you turn on live usage, pitboard sends claude.ai nothing.
 
-Every request verifies TLS against your system's trust store. Requests to Anthropic and OpenAI time out after 5 seconds.
+Every request verifies TLS against your system's trust store. Requests to Anthropic, OpenAI and claude.ai time out after 5 seconds.
+
+## Claude's encryption key
+
+Claude Desktop encrypts its cookies with a key in the keychain item `Claude Safe Storage`. Switching, enrolling and `pitboard doctor` never read it: pitboard tells accounts apart by files and a hash of the encrypted cookie.
+
+Live usage needs the key to send the session to claude.ai, so it is off until you run `pitboard desktop live-usage enable`. That command reads the key through `/usr/bin/security`, and macOS asks for your login password. After **Always Allow**, a background shell read the item with nobody at the Mac. Because pitboard reads it through `/usr/bin/security`, Always Allow may let other programs that run it read the item too, not only pitboard; that has not been measured.
+
+pitboard keeps the key in memory only and never writes the item. A read that would ask macOS again gives up after 10 seconds, and live usage pauses until you run the command again. Giving up does not close macOS's dialog: it stays on screen until you answer it. A refresh does not ask again until you run the command again, but each `enable` that runs out of time, and two processes reading at once, can each leave a dialog. `pitboard desktop live-usage disable` stops the reads and forgets the key, but leaves the item's access list as it is.
 
 ## Large logins on macOS
 
@@ -55,6 +66,7 @@ The command line reads the variable from your shell. The app reads it from its o
 - pitboard records a parked login's name before storing it and retries a failed delete, so no copy goes untracked.
 - A locked keychain is reported as unreadable, never as empty.
 - pitboard keeps no copy of a login in use.
+- pitboard moves nothing in Claude Desktop's data folder while Claude runs, and never deletes what it finds there.
 - pitboard refuses to keep its files in a synced folder, because a parked login belongs to one machine.
 - Every release is attested; see [Verify a download](/install/verify).
 - The app installs an update signed with the key it carries. A copy signed with a Developer ID also installs one whose app is signed by the same Developer ID team. The release workflow refuses a changed key unless the repository declares a rotation.
@@ -69,6 +81,7 @@ Deleting a parked login does not revoke it, and pitboard revokes no login. Its r
 - Another user with administrator access to your computer.
 - A compromised Claude Code or Codex, or a compromised library that pitboard uses. CI checks pitboard's Rust libraries against known advisories, and a weekly job checks Sparkle, the app's update framework, only for a newer release. Each release lists all of them in a bill of materials.
 - Signing out in anything that ran Codex before a switch, such as `/logout` in a `codex` session or **Log Out** in the ChatGPT app, which revokes the login pitboard has parked; see [Switch accounts](/guides/switch#what-happens-to-open-sessions).
+- Using **Log out** in Claude Desktop, which ends the session at claude.ai, so a copy pitboard parked before cannot be used again; see [Use pitboard with Claude Desktop](/guides/claude-desktop#add-claude-desktop-accounts).
 - Anyone who can already read your files.
 
 ## Report a vulnerability

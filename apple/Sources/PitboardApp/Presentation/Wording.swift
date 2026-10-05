@@ -18,9 +18,25 @@ func lasting(_ seconds: Int64, burning: Bool) -> String {
     return burning ? "about \(span) left at this rate" : "resets in \(span)"
 }
 
+/// Who is signed in, at the start of a sentence: the email, or words for an account with
+/// none, as a Claude Desktop account has, so the sentence never starts with nothing.
+func whoIsSignedIn(_ email: String) -> String {
+    email.isEmpty ? "An account" : email
+}
+
+/// What an account is called where nothing else names it: its label, its email, or words
+/// for an account with neither.
+func accountName(label: String?, email: String) -> String {
+    if let label { return label }
+    return email.isEmpty ? "Unnamed account" : email
+}
+
 /// What a renewal run did. Everything here is a login that was going to expire, so "nothing
-/// happened" is the good answer and has to read like one.
+/// happened" is the good answer and has to read like one. A Claude Desktop login is listed
+/// as `not_renewable` on every run: pitboard never renews one, so it was neither due nor a
+/// renewal that failed, and is left out.
 func renewalNote(_ renewals: [Renewed]) -> String {
+    let renewals = renewals.filter { $0.outcome != "not_renewable" }
     let renewed = renewals.filter { $0.outcome == "renewed" }.count
     switch (renewals.count, renewed) {
     case (0, _): return "Nothing was due."
@@ -117,6 +133,9 @@ private let english = Locale(identifier: "en_US_POSIX")
 /// The tool a bare label means, as the core reads one.
 let defaultProvider = "claude"
 
+/// Claude Desktop, as the core names the tool.
+let desktopProvider = "desktop"
+
 /// A name typed for a new account, with the tool it is for, as the core takes it. The
 /// picker is what says which tool, so a slash typed into the name is the core's to refuse
 /// rather than read as a second choice of tool.
@@ -184,4 +203,37 @@ func changeCaller(_ caller: String) -> String {
 /// does not parse, rather than nothing.
 func changeDate(_ at: String) -> Date? {
     try? Date(at, strategy: .iso8601)
+}
+
+/// Why an app has to quit before its tool can switch, as the alert that asks says it.
+/// Claude Desktop is not asked about: it is the app being switched, and is quit without it.
+func quitQuestion(name: String, to label: String) -> String {
+    return "\(name) keeps using the account it started with until it quits. pitboard quits "
+        + "it, switches, and opens it again."
+}
+
+/// When a parked Claude Desktop sign-in lapses. pitboard cannot renew one, so the date is
+/// the date, and a lapsed one has to be signed in to again in Claude.
+func desktopLapseNote(_ parked: Parked?, now: Date) -> String? {
+    guard let at = parked?.refreshExpiresAt else { return nil }
+    let lapses = Date(timeIntervalSince1970: TimeInterval(at))
+    guard lapses > now else {
+        return "Its sign-in has lapsed. Sign in to it again in Claude to use it."
+    }
+    var style = Date.FormatStyle(timeZone: .current).month(.abbreviated).day()
+    style.locale = english
+    return "Sign-in lapses on \(lapses.formatted(style)). pitboard cannot renew Claude "
+        + "Desktop sign-ins."
+}
+
+/// Where Claude Desktop's numbers come from, as Settings says it.
+func liveUsageLine(_ state: LiveUsageState) -> String {
+    guard state.enabled else {
+        return "Off. Numbers come from Claude’s own history, without reset times."
+    }
+    switch state.approval {
+    case "granted": return "On. Numbers come from claude.ai."
+    case "needs_approval": return "Paused: macOS stopped letting pitboard read Claude’s key."
+    default: return "On. pitboard asks claude.ai at the next read."
+    }
 }
