@@ -81,6 +81,39 @@ Never use **Log out** in Claude to add an account or to switch. Logging out ends
   </Tab>
 </Tabs>
 
+## Open Claude Code with a Desktop account
+
+An enrolled Desktop account can open Claude Code without another sign-in.
+
+In the Pitboard window, select **Accounts**, open the Desktop account's shortcut menu and choose **Open Claude Code**. Terminal opens the session. macOS may ask to let Pitboard control Terminal or read Claude's encryption key.
+
+From the command line, use the Desktop label:
+
+```sh
+pitboard desktop code work
+```
+
+Desktop renews the login. If its Code access has expired or is missing, open that account in Desktop, use its **Code** feature and try again. See [Desktop Code sessions](/reference/account-commands#desktop-code) for settings, history and errors.
+
+## Switch Claude Code and Claude Desktop together
+
+When the same claude.ai account is enrolled in Claude Code and in Claude Desktop, Pitboard can switch both apps to it at once. It matches the two by their claude.ai account, so their labels can differ. Codex has no part in this.
+
+<Tabs>
+  <Tab title="App">
+    In **Settings** > **General**, below **Claude Desktop**, turn on **Switch Claude Code and Claude Desktop together**. It is off until you turn it on. Choosing an account for either app then switches the other to the same claude.ai account, where the other has it enrolled. If the first switch fails, the other app stays as it was.
+  </Tab>
+  <Tab title="Command line">
+    Quit Claude, then add `--both`:
+
+    ```sh
+    pitboard use work --both
+    ```
+
+    If Claude is still open and Desktop needs to change accounts, Claude Code switches and the Desktop half stops with `app_still_open`. Quit Claude, then run `pitboard use desktop/work`.
+  </Tab>
+</Tabs>
+
 ## How Claude Desktop accounts differ
 
 - A parked Claude Desktop login cannot be renewed. Its sign-in lasts about 4 weeks, and `pitboard status` shows the date each parked one lapses. Switch to an account before that date to keep it. Pitboard warns 7 days ahead.
@@ -108,4 +141,4 @@ Pitboard reads Claude's encryption key, the keychain item `Claude Safe Storage`,
 
 Pitboard waits 2 minutes for an answer when you turn live usage on, and 10 seconds on a later read. When it stops waiting, the dialog can stay on screen. Click **Deny** to close it, then turn live usage on again. After a later read stops waiting, Pitboard does not ask again until you turn live usage on again. Each time turning it on runs out of time can leave a dialog, and so can the app and a command reading at once.
 
-If macOS stops letting Pitboard read the key, `pitboard status` says live usage is paused. The app says so once in a notification, and in the notice **Live usage for Claude is paused**. Click **Allow Again** there, or run the same command again. To turn live usage off and forget the key, turn off **Show live usage**, or run `pitboard desktop live-usage disable`. [Security and privacy](/security#claudes-encryption-key) says what this read means.
+If macOS stops letting Pitboard read the key, `pitboard status` says live usage is paused. The app says so once in a notification, and in the notice **Live usage for Claude is paused**. Click **Allow Again** there, or run the same command again. To turn live usage off and forget the key, turn off **Show live usage**, or run `pitboard desktop live-usage disable`. [Security and privacy](/security#encryption-key-for-claude) says what this read means.

@@ -323,6 +323,21 @@ impl State {
             .find(|a| a.provider() == provider && a.account_uuid == uuid)
     }
 
+    /// The same claude.ai account enrolled in the other Claude app, if it is.
+    ///
+    /// Claude Code keeps the account's uuid as `oauthAccount.accountUuid`, and Claude
+    /// Desktop as `lastKnownAccountUuid`, and the two are the same for one account
+    /// (`desktop_uuid_is_claude_codes`), so a uuid finds it whatever each is called.
+    /// Codex signs in to OpenAI and has none.
+    pub fn twin(&self, key: &Key) -> Option<&Account> {
+        let other = match key.provider {
+            ProviderId::Claude => ProviderId::Desktop,
+            ProviderId::Desktop => ProviderId::Claude,
+            ProviderId::Codex => return None,
+        };
+        self.by_uuid(other, &self.get(key)?.account_uuid)
+    }
+
     /// The account of `provider`'s a parked item was written for.
     ///
     /// A park's name carries the account's identity and not its tool, because names were
@@ -1296,6 +1311,36 @@ mod tests {
             Some(ProviderId::Desktop)
         );
         assert!(s.owner_of_park(ProviderId::Codex, "shared-uuid").is_none());
+    }
+
+    /// One claude.ai account enrolled in Claude Code and in Claude Desktop is the same
+    /// person in two apps, under one uuid, whatever each is called. Codex signs in to
+    /// another company, so it has no twin, and neither does an account enrolled once.
+    #[test]
+    fn a_claude_account_is_twinned_with_the_other_claude_app_by_uuid() {
+        let mut s = State::default();
+        s.upsert(desktop_account("home", "shared-uuid"));
+        s.upsert(Account {
+            account_uuid: "shared-uuid".into(),
+            ..account("bing", None)
+        });
+        s.upsert(account("alone", None));
+        s.upsert(desktop_account("solo", "solo-uuid"));
+        s.upsert(Account {
+            account_uuid: "shared-uuid".into(),
+            ..codex_account("work")
+        });
+
+        let desktop = Key::new(ProviderId::Desktop, "home");
+        assert_eq!(
+            s.twin(&claude("bing")).map(Account::key),
+            Some(desktop.clone())
+        );
+        assert_eq!(s.twin(&desktop).map(Account::key), Some(claude("bing")));
+        assert!(s.twin(&claude("alone")).is_none());
+        assert!(s.twin(&Key::new(ProviderId::Desktop, "solo")).is_none());
+        assert!(s.twin(&Key::new(ProviderId::Codex, "work")).is_none());
+        assert!(s.twin(&claude("nobody")).is_none());
     }
 
     /// Readings, budgets and history are filed by a key. One Anthropic account enrolled in

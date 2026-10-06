@@ -16,4 +16,7 @@ enum DefaultsKey {
     /// sent since live usage last worked, so it is sent once and not at every read, and not
     /// again by an app opened anew.
     static let liveUsagePauseTold = "liveUsagePauseTold"
+    /// Whether choosing an account in Claude Code or Claude Desktop switches the other to the
+    /// same claude.ai account too. Off unless somebody turns it on.
+    static let switchClaudeTogether = "switchClaudeTogether"
 }

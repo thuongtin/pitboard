@@ -464,6 +464,10 @@ public final class AppModel {
     /// on with the account left behind, and its own sign-out would revoke the login Pitboard
     /// has just parked. Claude Desktop, the app whose accounts are switched, is quit the way
     /// Command-Q quits it without being asked about first.
+    ///
+    /// Asked to switch both Claude apps together, a switch that worked is followed by one of
+    /// the other app to the same claude.ai account, where it has that account and is not
+    /// signed in to it already.
     func switchAsked(to qualified: String) async {
         // One switch at a time: the second would wait behind the first anyway, and its
         // choice was made from a menu that did not yet show the first. A question waiting
@@ -474,6 +478,39 @@ public final class AppModel {
         }
         // Claimed before anything is awaited, so a second request made meanwhile waits too.
         switching = qualified
+        // Found in what the menu showed when the choice was made: the read after the first
+        // switch can wait on the network.
+        let twin =
+            defaults.bool(forKey: DefaultsKey.switchClaudeTogether)
+            ? Self.twin(of: qualified, in: status?.accounts ?? []) : nil
+        guard await switchOne(qualified), let twin else { return }
+        // Claimed again before anything is awaited, as the first was.
+        switching = twin
+        await switchOne(twin)
+    }
+
+    /// The same claude.ai account in the other Claude app, by its uuid, which Claude Code and
+    /// Claude Desktop share for one account whatever each calls it: where it is enrolled
+    /// there and not signed in to already. Codex signs in to OpenAI and has none.
+    nonisolated static func twin(of qualified: String, in accounts: [Account]) -> String? {
+        let (provider, label) = split(qualified)
+        let other: String
+        switch provider {
+        case defaultProvider: other = desktopProvider
+        case desktopProvider: other = defaultProvider
+        default: return nil
+        }
+        let chosen = accounts.first { $0.provider == provider && $0.label == label }
+        guard let chosen, !chosen.accountUuid.isEmpty else { return nil }
+        return accounts.first {
+            $0.provider == other && $0.accountUuid == chosen.accountUuid && !$0.signedIn
+        }?.qualified
+    }
+
+    /// One switch of `switchAsked`, with any failure said in the window. Whether it was
+    /// made: not when it failed, or waits on a question about quitting an app.
+    @discardableResult
+    private func switchOne(_ qualified: String) async -> Bool {
         if let app = await appHolding(split(qualified).provider) {
             let pending = QuitToSwitch(
                 qualified: qualified, bundleID: app.bundleID, name: app.name)
@@ -481,15 +518,16 @@ public final class AppModel {
             // request to restart it, as adding one is. A question waited in the window,
             // which Claude in front hid, while the menu said "Switching…" for good.
             if split(qualified).provider == desktopProvider {
-                await quitAndSwitch(pending)
-                return
+                return await quitAndSwitch(pending)
             }
             switching = nil
             quitting = pending
             showWindow(.accounts)
-            return
+            return false
         }
-        present(await use(qualified))
+        let failure = await use(qualified)
+        present(failure)
+        return failure == nil
     }
 
     /// Quits the app, switches, and opens the same copy of the app again: Pitboard closed it,
@@ -499,8 +537,9 @@ public final class AppModel {
     /// before anything has changed.
     ///
     /// Takes the switch it was asked about rather than reading `quitting`: the alert that
-    /// asks is gone, and has said so, before this runs.
-    func quitAndSwitch(_ pending: QuitToSwitch) async {
+    /// asks is gone, and has said so, before this runs. Says whether the switch was made.
+    @discardableResult
+    func quitAndSwitch(_ pending: QuitToSwitch) async -> Bool {
         quitting = nil
         switching = pending.qualified
         defer { switching = nil }
@@ -511,8 +550,11 @@ public final class AppModel {
                     "Couldn’t switch to \(split(pending.qualified).label)",
                     message: "\(pending.name) is still open, so nothing has changed. Quit it, "
                         + "then switch again."))
+            return false
         case .notRunning:
-            present(await use(pending.qualified))
+            let failure = await use(pending.qualified)
+            present(failure)
+            return failure == nil
         case .quit(let copy):
             if split(pending.qualified).provider == desktopProvider,
                 !(await closed(pending.bundleID, of: desktopProvider))
@@ -521,7 +563,7 @@ public final class AppModel {
                 present(
                     Self.stillClosing(
                         "Couldn’t switch to \(split(pending.qualified).label)", pending.name))
-                return
+                return false
             }
             // Opened as soon as the switch is made, not after the read that follows it,
             // which can wait on the network.
@@ -532,6 +574,7 @@ public final class AppModel {
             if !Self.leftUnfinished(failure) { appControl.open(copy, inFront: inFront) }
             if failure == nil { await refresh() }
             present(failure)
+            return failure == nil
         }
     }
 
@@ -1404,6 +1447,16 @@ extension AppModel {
     /// turns it on: not a read, not a toggle, not a notification.
     func liveUsageAsked() {
         present(.liveUsage)
+    }
+
+    /// Opens the helper in Terminal; access grants stay inside the helper and Code.
+    func openDesktopCode(label: String) async {
+        guard switchUnderWay == nil, signingIn == nil else { return }
+        if case .failed(let message) = await machine.commandLineTool.openDesktopCode(
+            label: label)
+        {
+            present(ActionFailure("Couldn’t open Claude Code", message: message))
+        }
     }
 
     /// The sheet's Continue, and the one place live usage is turned on. Reading Claude's key

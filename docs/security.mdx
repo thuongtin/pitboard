@@ -17,7 +17,7 @@ On Linux, parked logins are files in `~/.pitboard/vault/`, at mode 0600 in a 070
 
 Claude Code keeps its login in a plaintext `~/.claude/.credentials.json`, as read in Claude Code 2.1.284. `pitboard doctor` fails if anyone else can read that file or the vault. On both systems, it warns if anyone else can read Codex's `auth.json`.
 
-Pitboard's other files hold no token, though some hold your email address, account identifiers and project paths; see [Files and environment variables](/reference/files#the-pitboard-directory).
+Pitboard's own records hold no token, though some hold your email address, account identifiers and project paths; see [Files and environment variables](/reference/files#the-pitboard-directory).
 
 ## Where account windows keep their data
 
@@ -47,7 +47,7 @@ The app opens only claude.ai and chatgpt.com links, and takes `chat.openai.com`,
 
 The app refuses the sites' sign-in links, such as claude.ai's `/magic-link` and chatgpt.com's `/api/auth`. One would sign the window in as whoever the link belongs to. See [Open a page from your browser](/guides/account-windows#open-a-page-from-your-browser).
 
-## Anthropic's terms
+## Anthropic terms
 
 Anthropic's [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) page for Claude Code says this about signing in and using logins, as read on 4 October 2026:
 
@@ -63,7 +63,7 @@ Pitboard makes only these requests. It has no server of its own and no telemetry
 
 | Request | Carries | Used for |
 | --- | --- | --- |
-| `api.anthropic.com/api/oauth/profile` | An access token | Which account a Claude Code login belongs to |
+| `api.anthropic.com/api/oauth/profile` | An access token | Which account a Claude Code login belongs to, or verifying a Desktop account before opening Code |
 | `api.anthropic.com/api/oauth/usage` | An access token | What a Claude Code account has left |
 | `platform.claude.com/v1/oauth/token` | A refresh token and the login's client id, or Claude Code's if it has none | Renewing a Claude Code parked login |
 | `chatgpt.com/backend-api/wham/usage` | An access token and the ChatGPT account id | What a Codex account has left, and whether OpenAI still accepts a login Pitboard is about to switch to. It counts against no limit. |
@@ -76,13 +76,17 @@ Pitboard never renews a login a tool is using. Each renewal is the request the t
 
 Every request verifies TLS against your system's trust store. Pitboard's own requests to Anthropic, OpenAI and claude.ai time out after 5 seconds.
 
-## Claude's encryption key
+## Encryption key for Claude
 
 Claude Desktop encrypts its cookies with a key in the keychain item `Claude Safe Storage`. Switching, enrolling and `pitboard doctor` never read it: Pitboard tells accounts apart by files and a hash of the encrypted cookie.
 
 Live usage needs the key to send the session to claude.ai, so it is off until you run `pitboard desktop live-usage enable`. That command reads the key through `/usr/bin/security`, and macOS asks for your login password. After **Always Allow**, a background shell read the item with nobody at the Mac. Because Pitboard reads it through `/usr/bin/security`, Always Allow may let other programs that run it read the item too, not only Pitboard; that has not been measured.
 
 Pitboard keeps the key in memory only and never writes the item. A read that would ask macOS again gives up after 10 seconds, and live usage pauses until you run the command again. Giving up does not close macOS's dialog: it stays on screen until you answer it. A refresh does not ask again until you run the command again, but each `enable` that runs out of time, and two processes reading at once, can each leave a dialog. `pitboard desktop live-usage disable` stops the reads and forgets the key, but leaves the item's access list as it is.
+
+`pitboard desktop code` also reads the key, to decrypt Desktop's Code access. It verifies the account and organisation with Anthropic before starting Code. Only the access token reaches Code, in its environment; the refresh token stays with Desktop. Neither token appears in command arguments or reports.
+
+Desktop Code sessions skip user, project and local settings, and refuse conflicting managed authentication settings. History and files Code creates remain in private directories per account. Those files are Code's output; they can contain information you give Code.
 
 ## Large logins on macOS
 

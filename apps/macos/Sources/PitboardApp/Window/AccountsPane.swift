@@ -166,6 +166,12 @@ struct AccountsPane: View {
             Button("Name…") { perform(said.action) }
         }
         if let label = account.label, !account.unplaced {
+            if account.provider == "desktop" {
+                Button("Open Claude Code…") {
+                    Task { await model.openDesktopCode(label: label) }
+                }
+                .disabled(model.switchUnderWay != nil || model.signingIn != nil)
+            }
             Button("Sign In Again…") {
                 model.present(.signInAgain(provider: account.provider, label: label))
             }

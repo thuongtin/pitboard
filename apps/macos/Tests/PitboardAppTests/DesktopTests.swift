@@ -98,6 +98,8 @@ private final class DesktopCore: Core, @unchecked Sendable {
             warnings: [])
     }
     func switchTo(_ label: String) async throws -> Switched {
+        // Claude Code keeps its login in the keychain, which Claude being open does not hold.
+        if label.hasPrefix("claude/") { return try switchClaudeCode(to: label) }
         try await quiet()
         if let switchFailing {
             self.switchFailing = nil
@@ -117,6 +119,26 @@ private final class DesktopCore: Core, @unchecked Sendable {
             outcome: .switched(
                 provider: "desktop", from: from, to: label,
                 adoption: .nextLaunch(program: "Claude")),
+            warnings: [])
+    }
+    /// Claude Code's side, for a machine with the same claude.ai accounts in both apps.
+    private func switchClaudeCode(to label: String) throws -> Switched {
+        if let switchFailing {
+            self.switchFailing = nil
+            throw switchFailing
+        }
+        trail.add("switch \(label)")
+        let from = accounts.first { $0.provider == "claude" && $0.signedIn }?.qualified ?? ""
+        accounts = accounts.map { account in
+            guard account.provider == "claude" else { return account }
+            return PitboardAppTests.account(
+                account.label, signedIn: account.qualified == label, uuid: account.accountUuid)
+        }
+        changed += 1
+        return Switched(
+            outcome: .switched(
+                provider: "claude", from: from, to: label,
+                adoption: .follows(withinSeconds: 33)),
             warnings: [])
     }
     func switchToSignedOut(_ tool: String) async throws -> Switched {
@@ -837,4 +859,88 @@ private func desktopMachine(
     // Named the way the real core names Claude's app, so what branches on it runs the same.
     let open = FixtureCore(.claudeDesktop, apps: FixtureApps(running: [FixtureApps.claude]))
     #expect(await open.holding("desktop").map(\.kind) == ["claude_desktop_app"])
+}
+
+// MARK: - Both Claude apps
+
+/// The machine `desktopMachine` makes, with Claude Code beside it holding the same two
+/// claude.ai accounts under names of its own: `home` is `personal`'s, signed in, and `job`
+/// is `work`'s.
+@MainActor
+private func bothApps(together: Bool) -> (AppModel, DesktopCore, Trail) {
+    let defaults = TestDefaults()
+    if together { defaults.set(true, forKey: DefaultsKey.switchClaudeTogether) }
+    let (model, core, _, trail) = desktopMachine(defaults: defaults)
+    core.accounts += [
+        account("home", signedIn: true, uuid: "personal"),
+        account("job", uuid: "work"),
+    ]
+    return (model, core, trail)
+}
+
+/// Asked to switch both Claude apps together, choosing an account in one switches the same
+/// claude.ai account in the other after it, whichever app it was chosen in, and whatever
+/// each calls it.
+@MainActor
+@Test func aSwitchOfOneClaudeAppSwitchesTheOtherWhenAsked() async throws {
+    let (model, _, trail) = bothApps(together: true)
+    await model.refresh()
+    await model.switchAsked(to: "desktop/work")
+    #expect(
+        trail.steps == [
+            "quit \(claudeApp)", "switch desktop/work", "open \(claudeApp) in front",
+            "switch claude/job",
+        ])
+    #expect(model.presentedFailure == nil)
+    #expect(model.switching == nil)
+
+    await model.switchAsked(to: "claude/home")
+    #expect(
+        Array(trail.steps.dropFirst(4)) == [
+            "switch claude/home", "quit \(claudeApp)", "switch desktop/personal",
+            "open \(claudeApp) in front",
+        ])
+    #expect(model.presentedFailure == nil)
+}
+
+/// Off unless somebody turns it on: the other app keeps its account.
+@MainActor
+@Test func aSwitchOfOneClaudeAppLeavesTheOtherByDefault() async throws {
+    let (model, _, trail) = bothApps(together: false)
+    await model.refresh()
+    await model.switchAsked(to: "claude/job")
+    #expect(trail.steps == ["switch claude/job"])
+}
+
+/// A switch that failed stops there: the other app is not moved to an account the first
+/// one did not reach.
+@MainActor
+@Test func aFailedSwitchLeavesTheOtherClaudeAppAlone() async throws {
+    let (model, core, trail) = bothApps(together: true)
+    await model.refresh()
+    core.switchFailing = PitboardError.Failed(
+        code: "login_expired", cause: nil, message: "expired", warnings: [])
+    await model.switchAsked(to: "claude/job")
+    #expect(trail.steps.isEmpty)
+    #expect(model.presentedFailure != nil)
+}
+
+/// The account found in the other app is the one with the same claude.ai account, by its
+/// uuid; one signed in already, one never enrolled there, and every Codex account have none.
+@Test func theOtherClaudeAppsAccountIsFoundByItsUuid() {
+    let accounts = [
+        desktop("personal", signedIn: true, uuid: "p"),
+        desktop("work", signedIn: false, uuid: "w"),
+        account("home", signedIn: true, uuid: "p"),
+        account("job", uuid: "w"),
+        account("solo", uuid: "s"),
+        account("work", of: "codex", uuid: "w"),
+        desktop(nil, signedIn: false, uuid: "w"),
+    ]
+    #expect(AppModel.twin(of: "desktop/work", in: accounts) == "claude/job")
+    #expect(AppModel.twin(of: "claude/job", in: accounts) == "desktop/work")
+    #expect(AppModel.twin(of: "desktop/personal", in: accounts) == nil)
+    #expect(AppModel.twin(of: "claude/solo", in: accounts) == nil)
+    #expect(AppModel.twin(of: "codex/work", in: accounts) == nil)
+    #expect(AppModel.twin(of: "claude/nobody", in: accounts) == nil)
 }

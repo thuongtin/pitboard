@@ -526,6 +526,25 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
             enrolled: state.labels(which),
         })?;
 
+    // A verified account already in use needs no move or repair. Reading its identity is
+    // safe while the app is open; every path that writes still goes through prepare.
+    if target.parked.is_none() && state.active_for(which) == Some(key.label.as_str()) {
+        let tree = tree_of(which)?;
+        if let Some(root) = tree.root(ctx)
+            && matches!(
+                identity::whose(&state, tree.identify(ctx, &root)?)?,
+                LiveOwner::Enrolled(found) if found == *key
+            )
+        {
+            return Ok((
+                Outcome::AlreadyActive {
+                    label: state.typed(key),
+                },
+                Vec::new(),
+            ));
+        }
+    }
+
     // S0: nothing written yet.
     let (tree, root) = prepare(ctx, which)?;
     let live = tree.identify(ctx, &root)?;

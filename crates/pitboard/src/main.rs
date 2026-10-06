@@ -71,6 +71,10 @@ enum Command {
         /// own for Pitboard to open
         #[arg(long)]
         signed_out: bool,
+        /// Switch the same claude.ai account in the other Claude app too: Claude Desktop
+        /// along with Claude Code, or Claude Code along with Claude Desktop
+        #[arg(long, conflicts_with = "signed_out")]
+        both: bool,
     },
     /// Drop an account and its parked login
     Forget {
@@ -165,6 +169,8 @@ struct Report {
     /// A command that produced a report and still failed. The envelope then carries both
     /// what was found and why the exit code is not zero.
     failure: Option<(&'static str, String)>,
+    /// Whether a person is told of `failure` as an error, where `human` does not say it.
+    failure_unsaid: bool,
 }
 
 impl Report {
@@ -176,6 +182,7 @@ impl Report {
             human,
             exit: 0,
             failure: None,
+            failure_unsaid: false,
         }
     }
 
@@ -187,6 +194,7 @@ impl Report {
             warnings: Vec::new(),
             human: String::new(),
             failure: None,
+            failure_unsaid: false,
         }
     }
 
@@ -231,9 +239,13 @@ fn emit(report: Report, as_json: bool) -> ExitCode {
         });
         println!("{envelope}");
     } else {
-        match &report.result {
-            Ok(_) => print!("{}", report.human),
-            Err(e) => eprintln!("{} {e}", paint(ERROR, "error:")),
+        match (&report.result, &report.failure) {
+            (Ok(_), Some((_, message))) if report.failure_unsaid => {
+                print!("{}", report.human);
+                eprintln!("{} {message}", paint(ERROR, "error:"));
+            }
+            (Ok(_), _) => print!("{}", report.human),
+            (Err(e), _) => eprintln!("{} {e}", paint(ERROR, "error:")),
         }
         for w in &report.warnings {
             eprintln!(
@@ -508,6 +520,61 @@ fn use_account(pitboard: &Pitboard, label: &str) -> Report {
     switched(pitboard.switch_to(label))
 }
 
+/// `pitboard use <label> --both`: the account, then the same claude.ai account in the other
+/// Claude app, found by its uuid whatever it is called there.
+///
+/// One after the other and not as one change: each app's switch is whole on its own, and
+/// one that is refused, Claude Desktop's while Claude is open, leaves the other made. Asked
+/// again, the made one is already signed in and the other goes through.
+fn use_both(pitboard: &Pitboard, label: &str) -> Report {
+    let Some(account) = pitboard.account(label) else {
+        // Not enrolled: the switch refuses it in its own words.
+        return use_account(pitboard, label);
+    };
+    let (this, other) = match account.provider() {
+        ProviderId::Claude => (ProviderId::Claude, ProviderId::Desktop),
+        ProviderId::Desktop => (ProviderId::Desktop, ProviderId::Claude),
+        elsewhere => {
+            return Report::failed(
+                Some("use"),
+                Error::Usage(format!(
+                    "--both switches Claude Code and Claude Desktop together, and {label} is \
+                     a {} account.",
+                    elsewhere.name()
+                )),
+            );
+        }
+    };
+    let mut first = use_account(pitboard, label);
+    let Ok(data) = &mut first.result else {
+        return first;
+    };
+    let Some(twin) = pitboard.twin(label) else {
+        data["also"] = Value::Null;
+        first.warnings.push(json!({
+            "code": "twin_not_enrolled",
+            "message": format!(
+                "{} has no account enrolled for {}'s claude.ai account, so only {} was \
+                 switched.",
+                other.name(),
+                bare(label),
+                this.name(),
+            ),
+        }));
+        return first;
+    };
+    let second = use_account(pitboard, &twin);
+    data["also"] = second.result.as_ref().cloned().unwrap_or(Value::Null);
+    first.human.push_str(&second.human);
+    first.warnings.extend(second.warnings);
+    if let Err(e) = second.result {
+        first.exit = e.exit_code();
+        first.failure = Some((e.code(), e.to_string()));
+        first.failure_unsaid = true;
+    }
+    first
+}
+
 /// `pitboard use desktop --signed-out`: the label is the tool to sign out.
 fn use_signed_out(pitboard: &Pitboard, tool: &str) -> Report {
     match ProviderId::parse(tool) {
@@ -729,6 +796,12 @@ fn renew(pitboard: &Pitboard) -> Report {
 
 #[derive(Subcommand)]
 enum DesktopCommand {
+    /// Open an interactive Claude Code session with this Desktop account's existing
+    /// access grant. Desktop remains responsible for renewal
+    Code {
+        /// The enrolled Desktop label, such as work
+        label: String,
+    },
     /// Ask claude.ai how much each Claude Desktop account has left, which needs Claude's
     /// key. Off until you turn it on; switching accounts never needs it
     LiveUsage {
@@ -1103,7 +1176,11 @@ fn main() -> ExitCode {
         Command::Use {
             label,
             signed_out: true,
+            ..
         } => use_signed_out(&pitboard, &label),
+        Command::Use {
+            label, both: true, ..
+        } => use_both(&pitboard, &label),
         Command::Use { label, .. } => use_account(&pitboard, &label),
         Command::Forget { label, yes } => {
             // The way back is a browser sign-in for that account, which is the cost
@@ -1155,6 +1232,36 @@ fn main() -> ExitCode {
             uninstall(&pitboard)
         }
         Command::Rename { from, to } => rename(&pitboard, &from, &to),
+        Command::Desktop {
+            what: DesktopCommand::Code { .. },
+        } if cli.json => Report {
+            exit: 2,
+            failure: Some((
+                "output_is_not_a_report",
+                "this command runs an interactive Claude Code session, so it has no JSON form"
+                    .into(),
+            )),
+            ..Report::done("desktop_code", json!({}), String::new())
+        },
+        Command::Desktop {
+            what: DesktopCommand::Code { label },
+        } => {
+            eprintln!(
+                "Pitboard reads Claude's encryption key to open Code for Desktop account `{label}`. macOS may ask for your login password."
+            );
+            match pitboard.desktop_code_session(&label).and_then(|session| {
+                eprintln!("This session uses Desktop's access grant until {}. If it expires, open this account in Desktop and launch a new Code session.", pitboard_core::time::local(session.expires_at(), "%b %-d %H:%M"));
+                session.run()
+            }) {
+                Ok(status) => return ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
+                Err(error) => Report {
+                    exit: 1,
+                    failure_unsaid: true,
+                    failure: Some((error.code(), error.to_string())),
+                    ..Report::done("desktop_code", json!({}), String::new())
+                },
+            }
+        }
         Command::Desktop {
             what: DesktopCommand::LiveUsage { what },
         } => live_usage(&pitboard, what, cli.json),
@@ -1240,7 +1347,7 @@ mod tests {
         assert!(
             matches!(
                 cli.command,
-                Some(Command::Use { ref label, signed_out: true }) if label == "desktop"
+                Some(Command::Use { ref label, signed_out: true, .. }) if label == "desktop"
             ),
             "the tool is what is signed out"
         );
@@ -1257,6 +1364,20 @@ mod tests {
             cli.command,
             Some(Command::Enroll { ref label, sign_in: false }) if label == "desktop/work"
         ));
+    }
+
+    /// `--both` names an account to switch in both Claude apps, so it cannot go with
+    /// `--signed-out`, which names a tool.
+    #[test]
+    fn both_switches_an_account_and_never_signs_out() {
+        let cli = Cli::try_parse_from(["pitboard", "use", "work", "--both"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Use { ref label, both: true, signed_out: false }) if label == "work"
+        ));
+        assert!(
+            Cli::try_parse_from(["pitboard", "use", "desktop", "--signed-out", "--both"]).is_err()
+        );
     }
 
     #[test]

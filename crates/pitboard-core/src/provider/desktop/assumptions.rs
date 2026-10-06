@@ -211,6 +211,15 @@ pub const ASSUMPTIONS: &[Assumption] = &[
         absent: &[],
     },
     Assumption {
+        name: "desktop_uuid_is_claude_codes",
+        fact: "for one claude.ai account, the app's `lastKnownAccountUuid` is the `oauthAccount.accountUuid` Claude Code keeps",
+        read_from: "this Mac on 5 October 2026: one claude.ai account enrolled from Claude Code (2.1.289 installed) and from Claude Desktop 2.19675.0 was filed under the same uuid by both enrolments, and the app's token caches are keyed `acct:<lastKnownAccountUuid>`, the uuid Anthropic's OAuth answers with (experiment E2)",
+        verified_against: VERIFIED_AGAINST,
+        depends: "State::twin, which switches the other Claude app along with one when somebody asks for both",
+        probe: &[],
+        absent: &[],
+    },
+    Assumption {
         name: "desktop_session_renewed_in_place",
         fact: "the app can replace an account's `sessionKey` while it stays signed in to that account, so an enrolled account comes back with a session Pitboard has not seen",
         read_from: "the app's logs and cookie jar on 5 October 2026: a session Pitboard had just put back was refused with `session_stale_relogin` a second after launch; 66 seconds later `main.log` said `clearing latched session_stale_relogin failures`, a new `sessionKey` was created in that second under the same `lastKnownAccountUuid`, and no `Login-state transition` was logged",
@@ -239,6 +248,30 @@ pub const ASSUMPTIONS: &[Assumption] = &[
     },
     Assumption {
         name: "desktop_token_cache_purpose",
+        // Cross-client study, 5 October 2026, app.asar from 2.19675.0:
+        // .vite/build/index.chunk-BZdcw7TE.js exports CLAUDE_CODE_OAUTH_CONFIGS with
+        // production client 9d1c250a-e61b-44d9-88ed-5944d1962f5e, COWORK_OAUTH_CONFIGS
+        // with a473d7bb-17ac-43a7-abc0-a1343d7c2805, and DESKTOP_OAUTH_CONFIGS with
+        // 89355bc3-cbfd-4382-905b-976645cad410. The first two use base scopes
+        // user:inference user:file_upload user:profile; getCcdOauthConfig adds
+        // user:sessions:claude_code. The Desktop config uses user:inference. These are
+        // bundled configs, not evidence of which grant a real account's cache holds.
+        // zln builds each cache key as acct:<account>|<client>:<org>:<apiHost>:<scope>;
+        // the initial static read did not open the encrypted cache. A subsequent
+        // user-authorized, read-only inspection on 5 October 2026 found Code-client
+        // grants in both the live cache and one park's tokenCacheV2, with user:inference,
+        // user:file_upload, user:profile and user:sessions:claude_code, nonexpired
+        // expiresAt values, and both token and refreshToken present. Only sanitized
+        // metadata was retained; no API call, refresh or credential write was attempted.
+        // Subsequent experiment T1, 5 October 2026: both grants were accepted by
+        // /api/oauth/profile and a real Haiku request in Code 2.1.289's normal print
+        // mode, each in a fresh home using only its access token in the environment.
+        // No refresh, sign-in, sign-out or write to the live stores was attempted.
+        // T2 on 5 October 2026 repeated both requests through desktop_code::prepare/run,
+        // with account and organisation verified before launching, fresh Code config and
+        // no refresh credential sent to Code. SafeStorage was scripted in the disposable
+        // core-service probe; the production CLI key reader cannot find the real item
+        // under the fixture HOME. This is service evidence, not a full app UI test.
         fact: "`oauth:tokenCache` and `oauth:tokenCacheV2` belong to the web account signed in",
         read_from: "experiment E9 on 4 October 2026: decrypted, each is keyed `acct:<lastKnownAccountUuid>|...:<org>:https://api.anthropic.com:<scopes>` and holds `token`, `refreshToken`, `expiresAt`, `subscriptionType` and `rateLimitTier`; 1668 and 1732 characters for one account, 28 and 1500 for the other",
         verified_against: VERIFIED_AGAINST,

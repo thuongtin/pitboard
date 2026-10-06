@@ -1389,6 +1389,7 @@ name = "pitboard-core"
 version = "0.7.0"
 dependencies = [
  "aes",
+ "base64",
  "hex",
  "jiff",
  "libc",
@@ -1398,6 +1399,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "unicode-normalization",
  "ureq",

@@ -18,16 +18,24 @@ struct CommandLineTool: Sendable {
     /// Where the link goes: `/usr/local/bin/pitboard` unless a test says otherwise, on the
     /// `PATH` macOS gives every shell and in a directory only an administrator can write to.
     let link: String
+    /// Nonsecret paths the helper needs to read the same Desktop state as this app.
+    let codeEnvironment: [String: String]
     /// A test hands in its own, so nothing it does waits on a password prompt.
     private let execute: Runner
 
     /// Runs an AppleScript and hands back the error it raised, or nil.
     typealias Runner = @Sendable (String) -> NSDictionary?
 
-    init(helper: String?, installPlaces: [String], link: String, execute: @escaping Runner) {
+    init(
+        helper: String?, installPlaces: [String], link: String,
+        codeEnvironment: [String: String] = [:], execute: @escaping Runner
+    ) {
         self.helper = helper
         self.installPlaces = installPlaces
         self.link = link
+        self.codeEnvironment = codeEnvironment.filter {
+            Self.codeEnvironmentKeys.contains($0.key)
+        }
         self.execute = execute
     }
 
@@ -35,13 +43,23 @@ struct CommandLineTool: Sendable {
     /// core reads from this app's environment unless a test says otherwise.
     init(
         bundle: URL = Bundle.main.bundleURL,
-        home: String = homeDirectory(environment: ProcessInfo.processInfo.environment),
+        home: String? = nil,
         link: String = "/usr/local/bin/pitboard",
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         execute: @escaping Runner = CommandLineTool.execute(script:)
     ) {
+        let home = home ?? homeDirectory(environment: environment)
+        var codeEnvironment = [
+            "HOME": home,
+            "PITBOARD_HOME": environment["PITBOARD_HOME"] ?? "\(home)/.pitboard",
+            "PITBOARD_CLAUDE_DESKTOP_DIR": environment["PITBOARD_CLAUDE_DESKTOP_DIR"]
+                ?? "\(home)/Library/Application Support/Claude",
+        ]
+        codeEnvironment["PITBOARD_CLAUDE"] = environment["PITBOARD_CLAUDE"]
         self.init(
             helper: Settings.bundledCommandLine(in: bundle),
-            installPlaces: commandLinePlaces(home: home), link: link, execute: execute)
+            installPlaces: commandLinePlaces(home: home), link: link,
+            codeEnvironment: codeEnvironment, execute: execute)
     }
 
     /// The first `pitboard` found.
@@ -101,6 +119,41 @@ struct CommandLineTool: Sendable {
         return await Task.detached(priority: .userInitiated) {
             Self.outcome(of: execute(source))
         }.value
+    }
+
+    /// Opens Code through this app's helper. Terminal receives a label and nonsecret paths;
+    /// the helper reads and validates the Desktop login without handing it back to the app.
+    func openDesktopCode(label: String) async -> Linked {
+        guard let helper, canRun(path: helper) else {
+            return .failed(
+                "This copy of Pitboard cannot open Claude Code with the command line inside it."
+            )
+        }
+        let (source, execute) = (
+            Self.script(openingDesktopCode: helper, label: label, environment: codeEnvironment),
+            execute
+        )
+        return await Task.detached(priority: .userInitiated) {
+            Self.outcome(of: execute(source))
+        }.value
+    }
+
+    private static let codeEnvironmentKeys = [
+        "HOME", "PITBOARD_HOME", "PITBOARD_CLAUDE_DESKTOP_DIR", "PITBOARD_CLAUDE",
+    ]
+
+    /// Terminal runs the bundled helper with shell-quoted arguments, never a login token.
+    static func script(
+        openingDesktopCode helper: String, label: String, environment: [String: String] = [:]
+    ) -> String {
+        let assignments = codeEnvironmentKeys.compactMap { key in
+            environment[key].map { "quoted form of \(literal("\(key)=\($0)")) & \" \" & " }
+        }.joined()
+        return "tell application \"Terminal\"\n"
+            + "    do script \"/usr/bin/env \" & \(assignments)"
+            + "quoted form of \(literal(helper)) & \" desktop code -- \" & "
+            + "quoted form of \(literal(label))\n"
+            + "    activate\nend tell"
     }
 
     /// The script that runs `command` as an administrator. macOS asks for the password in

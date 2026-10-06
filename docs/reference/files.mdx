@@ -31,9 +31,11 @@ Pitboard refuses a directory whose path contains `Dropbox`, `Google Drive`, `One
 | `backups/` | Copies of Claude Code's config from before each switch rewrote it. Each is named after the time it was made, in seconds since 1 January 1970, such as `claude.json.1790000000`. The 10 newest are kept. They hold no login, but do hold your email address, your Anthropic account and organisation identifiers, and the path of each project Claude Code has opened. Each keeps the mode of Claude Code's file. | A Claude Code switch |
 | `audit.log` | One tab-separated line per change or renewal: the time, `cli` or `app` for where it was made, the verb such as `use`, the subject and the outcome. It holds no email address, and holds an account id only in a `reclaim` line with the outcome `discarded`, whose subject is a parked login's name. [`pitboard log`](/reference/maintenance-commands#log) prints it. | Every change Pitboard makes, and renewals |
 | `audit.log.1` | The previous `audit.log`, moved aside once it passed 256 KiB | Every change Pitboard makes, and renewals |
-| `desktop/` | Claude Desktop's parks and records, listed in [Claude Desktop's parks](/reference/files#claude-desktops-parks) | Claude Desktop changes, and `pitboard desktop live-usage` |
+| `desktop/` | Claude Desktop's parks and records, listed in [Claude Desktop's parks](/reference/files#claude-desktop-parks) | Claude Desktop changes, `pitboard desktop live-usage` and `pitboard desktop code` |
 
-Only files in `vault/`, `signin/` and `desktop/parks/` can hold a login. To delete the directory, see [Remove Pitboard](/install/remove#delete-parked-logins-and-pitboards-files).
+Pitboard keeps logins in `vault/`, `signin/` and `desktop/parks/`. Desktop Code sessions also keep files Code writes. To delete the directory, see [Remove Pitboard](/install/remove#delete-parked-logins-and-pitboard-files).
+
+Desktop Code sessions keep conversation history in `desktop/code-sessions/<account hash>/projects/`, shared only within that account. Each launch creates a private `session-*` directory beside it, with a link to `projects/`. Pitboard keeps the directory and files Code creates after exit.
 
 ## Parked logins
 
@@ -45,7 +47,7 @@ On Linux, each parked login is a file in `~/.pitboard/vault/`, named `pitboard-p
 
 For why parked logins are kept there, see [Security and privacy](/security#where-parked-logins-are-kept).
 
-## Claude Desktop's parks
+## Claude Desktop parks
 
 A Claude Desktop parked login is a folder, not a keychain item. Pitboard keeps it and its records in `~/.pitboard/desktop/`, which must be on the same volume as Claude's data folder.
 
@@ -84,7 +86,7 @@ Claude Desktop's data folder is `~/Library/Application Support/Claude`. A switch
 | `config.json` | Read for `lastKnownAccountUuid`. A switch writes its `oauth:tokenCache`, `oauth:tokenCacheV2` and `lastKnownAccountUuid` keys, and leaves the rest as it was. |
 | `plan-usage-history.json` | Read for usage. Never moved: it belongs to the machine. |
 | `SingletonLock` | Read to tell whether Claude is open. Claude 2.19675.0 keeps none, so Pitboard relies on the processes running from `Claude.app`. |
-| Keychain item `Claude Safe Storage` | Read only by `pitboard desktop live-usage` once you turn it on, never written. See [Claude's encryption key](/security#claudes-encryption-key). |
+| Keychain item `Claude Safe Storage` | Read by `pitboard desktop live-usage` once you turn it on, and by `pitboard desktop code`; never written. See [Claude's encryption key](/security#encryption-key-for-claude). |
 | `/Applications/Claude.app` | Read for its version. A process running from a bundle named `Claude.app` stops a switch. |
 
 ## Renewal schedule

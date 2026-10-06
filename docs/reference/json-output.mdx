@@ -35,7 +35,7 @@ It prints this on one line:
 </ResponseField>
 
 <ResponseField name="command" type="string | null" required>
-  The command that ran, such as `rename`. The three `schedule` commands give `schedule`, the three `desktop live-usage` commands give `desktop`, and `completions` and `manpage` give `generate`. `null` when Pitboard could not parse the command line.
+  The command that ran, such as `rename`. The three `schedule` commands give `schedule`, the three `desktop live-usage` commands give `desktop`, and `completions` and `manpage` give `generate`. `desktop code` refuses `--json` with `command` set to `desktop_code`. `null` when Pitboard could not parse the command line.
 </ResponseField>
 
 <ResponseField name="ok" type="boolean" required>
@@ -43,7 +43,7 @@ It prints this on one line:
 </ResponseField>
 
 <ResponseField name="data" type="object | null" required>
-  What the command found or did, as listed in [Data by command](/reference/json-output#data-by-command). `null` when the command failed, except for `doctor` and `generate`.
+  What the command found or did, as listed in [Data by command](/reference/json-output#data-by-command). `null` when the command failed, except for `doctor`, `generate` and a refused `desktop_code` request.
 </ResponseField>
 
 <ResponseField name="warnings" type="object[]" required>
@@ -97,7 +97,7 @@ The `data` of each command, in the order of `pitboard --help`:
 | --- | --- |
 | `status` | See [Status data](/reference/json-output#status-data). |
 | `enroll` | `label` as typed, `provider` (`claude`, `codex` or `desktop`), `email`, and `enrolled`: `current`, `signed_in`, `renewed` or `in_use`, as [Account commands](/reference/account-commands#enroll) explains. |
-| `use` | Already in use: `to`, and `changed` set to `false`. After a switch: `from`, `to`, `provider`, `changed` set to `true`, `parked_at` (when the login you left was parked), `adoption_ceiling_seconds` and `adoption`. `from` is `null` when nothing was signed in. After `pitboard use desktop --signed-out`: `to` is `null` and `signed_out` is `true`. |
+| `use` | Already in use: `to`, and `changed` set to `false`. After a switch: `from`, `to`, `provider`, `changed` set to `true`, `parked_at` (when the login you left was parked), `adoption_ceiling_seconds` and `adoption`. `from` is `null` when nothing was signed in. After `pitboard use desktop --signed-out`: `to` is `null` and `signed_out` is `true`. With `--both`, also `also`: the other Claude app's `data` in the same shape, or `null` when it has no account for the same claude.ai account or its switch failed. |
 | `forget` | `label` and `email`. |
 | `abandon` | `abandoned`, `false` when there was no interrupted switch. When it is `true`, also `from`, `to` and `logins_kept`, a count. For an interrupted Claude Desktop switch, `logins_kept` counts the items in both parks, and `from` or `to` can be an empty string. |
 | `repair` | `given_back`, a list of objects with `label` and `service`, the parked login's name. `deleted`, `strangers` (left alone because they belong to no account this Pitboard knows) and `unreadable`, lists of parked login names. All four are always present. |
@@ -108,7 +108,7 @@ The `data` of each command, in the order of `pitboard --help`:
 | `uninstall` | `parks_removed`, `parks_pending` (could not be deleted) and `parks_left` (left because another Pitboard may own them), counts. `home_removed` and `schedule_removed`, booleans. |
 | `rename` | `from`, `to` and `email`. |
 | `desktop` | `live_usage`, the object described in [Status data](/reference/json-output#status-data), after the change the command made. |
-| `doctor` | `environment`: the paths and login stores Pitboard found, the version of OpenAI's Codex CLI and, when Claude Desktop is there, `desktop`, described in [Doctor's Claude Desktop facts](/reference/json-output#doctors-claude-desktop-facts). `checks`, each with `code`, `name`, `level` (`ok`, `warn` or `fail`), `detail` and `advice`, as [Maintenance commands](/reference/maintenance-commands#doctor) lists. |
+| `doctor` | `environment`: the paths and login stores Pitboard found, the version of OpenAI's Codex CLI and, when Claude Desktop is there, `desktop`, described in [Doctor's Claude Desktop facts](/reference/json-output#claude-desktop-facts-from-doctor). `checks`, each with `code`, `name`, `level` (`ok`, `warn` or `fail`), `detail` and `advice`, as [Maintenance commands](/reference/maintenance-commands#doctor) lists. |
 | `statusline` | `line`, the status line without colour. |
 | `generate` (`completions` and `manpage`) | `{}` |
 
@@ -207,7 +207,7 @@ These codes apply only to Claude Desktop:
 | `recovery_waiting` | An interrupted Claude Desktop switch waits for Claude to be quit. | `` an interrupted switch waits for Claude to be quit; run `pitboard doctor` `` |
 | `bot_check` | claude.ai's bot check stopped the request. The error's cause stays `server_error`. | `claude.ai's bot check stopped the request; try again later` |
 
-## Doctor's Claude Desktop facts
+## Claude Desktop facts from doctor
 
 `environment.desktop` in `pitboard doctor --json` is present when Claude Desktop is installed, an account of it is enrolled, or Pitboard has Claude Desktop files. It is read without the keychain.
 

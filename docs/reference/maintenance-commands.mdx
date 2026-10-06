@@ -303,7 +303,7 @@ Usage: pitboard desktop live-usage [OPTIONS] <COMMAND>
 | `disable` | Stop asking claude.ai, and forget the key |
 | `status` | Say whether it is on, and whether macOS lets Pitboard read the key |
 
-Until live usage is on, `status` reads Claude Desktop's usage from Claude's own history and sends claude.ai nothing. `enable` reads Claude's encryption key, the keychain item `Claude Safe Storage`, and checks it opens Claude's session. Pitboard keeps the key in memory only and writes it nowhere. In a terminal, `enable` first says why. [Security and privacy](/security#claudes-encryption-key) says what this read means.
+Until live usage is on, `status` reads Claude Desktop's usage from Claude's own history and sends claude.ai nothing. `enable` reads Claude's encryption key, the keychain item `Claude Safe Storage`, and checks it opens Claude's session. Pitboard keeps the key in memory only and writes it nowhere. In a terminal, `enable` first says why. [Security and privacy](/security#encryption-key-for-claude) says what this read means.
 
 `enable` needs someone at the Mac's own screen to answer macOS, and waits 2 minutes for an answer. From a shell that cannot show macOS's dialog, after **Deny**, or with nobody answering, it fails with `live_usage_not_allowed`; SSH has not been measured. After **Always Allow**, a background shell read the key with nobody at the Mac.
 
@@ -325,4 +325,4 @@ pitboard desktop live-usage status
 Live usage is off: Claude Desktop's usage is read from its own history. Turn it on with `pitboard desktop live-usage enable`.
 ```
 
-See [Use Pitboard with Claude Desktop](/guides/claude-desktop#see-usage-from-claudeai).
+See [Use Pitboard with Claude Desktop](/guides/claude-desktop#see-usage-from-claude-ai).

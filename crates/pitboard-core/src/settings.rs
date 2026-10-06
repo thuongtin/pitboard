@@ -61,7 +61,7 @@ fn managed_dir() -> PathBuf {
     })
 }
 
-fn managed_files() -> Vec<PathBuf> {
+pub(crate) fn managed_files() -> Vec<PathBuf> {
     let dir = managed_dir();
     let mut files = vec![dir.join("managed-settings.json")];
     if let Ok(entries) = std::fs::read_dir(dir.join("managed-settings.d")) {

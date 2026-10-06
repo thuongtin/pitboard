@@ -17,11 +17,11 @@
 
 mod common;
 
-use common::Env;
 use common::desktop::{
     FAR_OFF, claude_is_running, hold_with_a_stand_in, home_signed_in_work_parked, inodes_under,
     sign_in_desktop, signed_in_uuid, support, write_history,
 };
+use common::{Env, two_accounts};
 use serde_json::Value;
 
 fn json_of(env: &Env, args: &[&str]) -> (Value, i32) {
@@ -30,6 +30,33 @@ fn json_of(env: &Env, args: &[&str]) -> (Value, i32) {
     let (out, err, code) = env.run(&with_json);
     let value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"));
     (value, code)
+}
+
+#[test]
+fn opening_code_refuses_json_before_reading_any_desktop_key() {
+    let env = Env::new("desktop-code-json");
+    let (value, code) = json_of(&env, &["desktop", "code", "home"]);
+    assert_eq!(code, 2);
+    assert_eq!(value["error"]["code"], "output_is_not_a_report");
+    assert_eq!(value["ok"], false);
+}
+
+#[test]
+fn opening_code_says_why_a_desktop_grant_is_missing() {
+    let env = Env::new("desktop-code-missing");
+    home_signed_in_work_parked(&env);
+    let config_path = support(&env).join("config.json");
+    common::guard_not_live_dir(&config_path);
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config.as_object_mut().unwrap().remove("oauth:tokenCacheV2");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let (out, err, code) = env.run(&["desktop", "code", "home"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        err.contains("Desktop has no usable Claude Code grant (missing)"),
+        "{err}"
+    );
+    assert!(!err.contains("cache-of"), "{err}");
 }
 
 /// Enrol the account signed in, switch to another, and back: each session goes into its
@@ -434,4 +461,166 @@ fn nothing_here_reads_the_real_support_dir() {
         before,
         "the person's own Claude Desktop folder changed"
     );
+}
+
+/// Claude Code with alpha signed in and beta parked, and Claude Desktop with alpha's
+/// claude.ai account enrolled as `home` and beta's as `work`, `home` signed in: one person's
+/// two accounts, each in both apps under its own name there.
+fn twins(name: &str) -> Env {
+    let env = two_accounts(name);
+    let (a, b) = (env.uuid('a'), env.uuid('b'));
+    sign_in_desktop(&env, 'w', &b);
+    let (_, err, code) = env.run(&["enroll", "desktop/work"]);
+    assert_eq!(code, 0, "enroll desktop/work: {err}");
+    let (_, err, code) = env.run(&["use", "desktop", "--signed-out"]);
+    assert_eq!(code, 0, "{err}");
+    sign_in_desktop(&env, 'h', &a);
+    let (_, err, code) = env.run(&["enroll", "desktop/home"]);
+    assert_eq!(code, 0, "enroll desktop/home: {err}");
+    env
+}
+
+/// `--both` switches the account asked for and the same claude.ai account in the other
+/// Claude app, which is found by its uuid whatever it is called there, and from either app.
+#[test]
+fn use_both_switches_the_same_account_in_the_other_claude_app() {
+    let env = twins("desktop-both");
+    let (value, code) = json_of(&env, &["use", "beta", "--both"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["to"], "beta", "{value}");
+    assert_eq!(value["data"]["also"]["to"], "desktop/work", "{value}");
+    assert_eq!(value["data"]["also"]["changed"], true, "{value}");
+    assert_eq!(env.state()["active"]["claude"], "beta");
+    assert_eq!(signed_in_uuid(&env), Some(env.uuid('b')));
+
+    let (out, err, code) = env.run(&["use", "desktop/home", "--both"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("Switched Claude Desktop to home"), "{out}");
+    assert!(out.contains("Switched to alpha; beta is parked"), "{out}");
+    assert_eq!(signed_in_uuid(&env), Some(env.uuid('a')));
+    assert_eq!(env.state()["active"]["claude"], "alpha");
+
+    let (value, code) = json_of(&env, &["use", "alpha", "--both"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["changed"], false, "{value}");
+    assert_eq!(value["data"]["also"]["changed"], false, "{value}");
+}
+
+/// Without the same account in the other app, `--both` switches the one asked for and says
+/// there was nothing to switch alongside it. Without `--both`, the other app is left alone.
+#[test]
+fn use_both_without_a_twin_switches_one_and_says_so() {
+    let env = twins("desktop-both-alone");
+    let (value, code) = json_of(&env, &["use", "beta"]);
+    assert_eq!(code, 0, "{value}");
+    assert!(value["data"].get("also").is_none(), "{value}");
+    assert_eq!(signed_in_uuid(&env), Some(env.uuid('a')), "Desktop stays");
+
+    let (_, err, code) = env.run(&["use", "alpha"]);
+    assert_eq!(code, 0, "{err}");
+    let (_, err, code) = env.run(&["forget", "desktop/work", "--yes"]);
+    assert_eq!(code, 0, "{err}");
+    let (value, code) = json_of(&env, &["use", "beta", "--both"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["to"], "beta", "{value}");
+    assert_eq!(value["data"]["changed"], true, "{value}");
+    assert!(value["data"]["also"].is_null(), "{value}");
+    assert_eq!(value["warnings"][0]["code"], "twin_not_enrolled", "{value}");
+    let (_, err, code) = env.run(&["use", "beta", "--both"]);
+    assert_eq!(code, 0);
+    assert!(
+        err.contains(
+            "Claude Desktop has no account enrolled for beta's claude.ai account, so only \
+             Claude Code was switched."
+        ),
+        "{err}"
+    );
+    assert_eq!(signed_in_uuid(&env), Some(env.uuid('a')), "Desktop stays");
+}
+
+/// Claude open keeps its folder, so its half is refused, the half already made stays made,
+/// and the command fails with the app's own error so a script knows to quit Claude and run
+/// it again.
+#[test]
+fn use_both_while_claude_runs_switches_claude_code_and_fails() {
+    let env = twins("desktop-both-open");
+    let _held = hold_with_a_stand_in(&env);
+    let (value, code) = json_of(&env, &["use", "beta", "--both"]);
+    assert_eq!(code, 3, "{value}");
+    assert_eq!(value["ok"], false, "{value}");
+    assert_eq!(value["data"]["to"], "beta", "{value}");
+    assert_eq!(value["error"]["code"], "app_still_open", "{value}");
+    assert_eq!(env.state()["active"]["claude"], "beta");
+    assert_eq!(signed_in_uuid(&env), Some(env.uuid('a')), "Desktop stays");
+
+    let (out, err, code) = env.run(&["use", "beta", "--both"]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert!(out.contains("beta is already signed in."), "{out}");
+    assert!(err.contains("error: Claude is still open"), "{err}");
+}
+
+/// An already selected Desktop account needs no move or repair, even while Claude runs.
+/// Code may change first, but Desktop's live identity must still match the selected UUID.
+#[test]
+fn use_both_keeps_an_already_selected_desktop_account_open() {
+    for change_code in [false, true] {
+        let env = twins(if change_code {
+            "desktop-both-current-code-changes"
+        } else {
+            "desktop-both-current"
+        });
+        if change_code {
+            let (_, err, code) = env.run(&["use", "beta"]);
+            assert_eq!(code, 0, "{err}");
+        }
+        let _held = hold_with_a_stand_in(&env);
+        let before = inodes_under(&support(&env));
+        let (value, code) = json_of(&env, &["use", "alpha", "--both"]);
+        assert_eq!(code, 0, "{value}");
+        assert_eq!(value["data"]["changed"], change_code, "{value}");
+        assert_eq!(value["data"]["also"]["changed"], false, "{value}");
+        assert_eq!(env.state()["active"]["claude"], "alpha");
+        assert_eq!(signed_in_uuid(&env), Some(env.uuid('a')));
+        assert_eq!(inodes_under(&support(&env)), before, "Desktop did not move");
+    }
+}
+
+/// The record of the account in use cannot substitute for Desktop's actual identity.
+#[test]
+fn use_both_does_not_trust_a_stale_desktop_active_label() {
+    let env = twins("desktop-both-stale-active");
+    let cookies = support(&env).join("Cookies");
+    common::guard_not_live_dir(&cookies);
+    std::fs::remove_file(cookies).unwrap();
+    sign_in_desktop(&env, 'w', &env.uuid('b'));
+    let _held = hold_with_a_stand_in(&env);
+    let before = inodes_under(&support(&env));
+    let (value, code) = json_of(&env, &["use", "alpha", "--both"]);
+    assert_ne!(code, 0, "{value}");
+    assert_eq!(value["ok"], false, "{value}");
+    assert!(value["data"]["also"].is_null(), "{value}");
+    assert_eq!(signed_in_uuid(&env), Some(env.uuid('b')));
+    assert_eq!(inodes_under(&support(&env)), before, "Desktop did not move");
+}
+
+/// A matching config UUID does not override a cookie Pitboard knows belongs elsewhere.
+#[test]
+fn use_both_checks_the_owner_of_an_already_selected_desktop_cookie() {
+    let env = twins("desktop-both-cookie-owner");
+    let cookies = support(&env).join("Cookies");
+    common::guard_not_live_dir(&cookies);
+    std::fs::remove_file(cookies).unwrap();
+    sign_in_desktop(&env, 'w', &env.uuid('b'));
+    let config_path = support(&env).join("config.json");
+    common::guard_not_live_dir(&config_path);
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["lastKnownAccountUuid"] = Value::String(env.uuid('a'));
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let _held = hold_with_a_stand_in(&env);
+    let before = inodes_under(&support(&env));
+    let (value, code) = json_of(&env, &["use", "alpha", "--both"]);
+    assert_ne!(code, 0, "{value}");
+    assert_eq!(value["ok"], false, "{value}");
+    assert!(value["data"]["also"].is_null(), "{value}");
+    assert_eq!(inodes_under(&support(&env)), before, "Desktop did not move");
 }

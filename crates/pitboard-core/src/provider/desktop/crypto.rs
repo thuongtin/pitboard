@@ -2,7 +2,7 @@
 //! keychain item `Claude Safe Storage`, stretched by PBKDF2-HMAC-SHA1 into an AES-128 key,
 //! and every value AES-128-CBC under a fixed IV behind a `v10` prefix.
 //!
-//! Only live usage decrypts anything, and only once somebody turned it on. Read from
+//! Live usage and an explicitly requested Code session decrypt values. Read from
 //! Chromium's `os_crypt_mac.mm` and `cookie_util`, and dated in the register under
 //! `desktop_cookie_encryption`.
 
@@ -49,6 +49,15 @@ pub(crate) fn derive_key(password: &[u8]) -> Zeroizing<[u8; 16]> {
         key.as_mut(),
     );
     key
+}
+
+/// Electron safeStorage text has the same v10 envelope without a cookie's host hash.
+/// Measured against Desktop 2.19675.0 in experiment T1.
+pub(crate) fn decrypt_cache(
+    key: &[u8; 16],
+    encrypted: &[u8],
+) -> Result<Zeroizing<String>, CryptoError> {
+    decrypt(key, "", encrypted, 0)
 }
 
 /// The cleartext of one cookie value stored for `host_key` in a database of

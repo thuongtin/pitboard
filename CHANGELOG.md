@@ -11,6 +11,15 @@ the menu bar app quits Claude around a switch and opens it again.
 
 ### Added
 
+- **Open Claude Code** on a named Desktop account opens a Code session in Terminal without
+  another browser sign-in. `pitboard desktop code <label>` does the same. Pitboard verifies
+  the account and organisation before starting Code and passes only the existing access
+  grant, keeping Desktop responsible for renewal. An expired or missing grant requires
+  opening that account in Desktop and using its Code feature before trying again.
+  These sessions use a fresh private Code configuration and skip user, project and local
+  settings to prevent another login overriding the selected account. Conflicting managed
+  authentication settings stop the launch. Conversation history and files Code creates
+  stay under Pitboard's Desktop folder, separately for each account.
 - `pitboard enroll desktop/<label>` enrols the account Claude Desktop is signed in to, and
   `pitboard use desktop/<label>` switches it. Claude Desktop keeps its login in its data
   folder, so a switch moves the cookie jar, the storage folders that belong to the account
@@ -66,6 +75,13 @@ the menu bar app quits Claude around a switch and opens it again.
   off and forgets the key, and `status` says whether it is on. An answer from the keychain
   Pitboard does not expect pauses it until you allow it again, instead of asking on every
   refresh.
+- `pitboard use <label> --both` switches the same claude.ai account in Claude Code and in
+  Claude Desktop, matched by account uuid rather than by label, and the app's setting
+  **Switch Claude Code and Claude Desktop together**, off by default, does the same when an
+  account is chosen for either. Both apps file one claude.ai account under the same uuid,
+  measured on 5 October 2026. Without an account in the other app, only the named one
+  switches, with the warning `twin_not_enrolled`.
+  A verified Desktop account already in use stays open when no move or repair is needed.
 - `pitboard renew` lists each parked Claude Desktop login as not renewable, with the date
   its sign-in lapses, and switches and `status` warn with `park_expires_soon` a week before.
   A Claude Desktop session lasts about four weeks and Pitboard cannot renew it.

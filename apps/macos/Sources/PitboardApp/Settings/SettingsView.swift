@@ -147,6 +147,7 @@ private struct GeneralSettings: View {
 /// explains the keychain's prompt; its Continue is what turns it on.
 private struct DesktopSettings: View {
     let model: AppModel
+    @AppStorage(DefaultsKey.switchClaudeTogether) private var together = false
 
     private var state: LiveUsageState {
         model.liveUsage
@@ -184,6 +185,16 @@ private struct DesktopSettings: View {
                 "Live usage asks claude.ai how much each Claude Desktop account has left, "
                     + "which takes reading a key Claude keeps in your login keychain. "
                     + "Switching accounts never reads it."
+            )
+            .footnote()
+        }
+        Section {
+            Toggle("Switch Claude Code and Claude Desktop together", isOn: $together)
+                .accessibilityIdentifier("settings.switchClaudeTogether")
+        } footer: {
+            Text(
+                "Choosing an account in one switches the other to the same claude.ai "
+                    + "account, where both have it."
             )
             .footnote()
         }

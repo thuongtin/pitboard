@@ -12,6 +12,7 @@
 //! engine's.
 
 pub mod assumptions;
+pub(crate) mod code_cache;
 pub(crate) mod config;
 pub(crate) mod cookies;
 pub(crate) mod crypto;

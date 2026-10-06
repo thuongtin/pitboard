@@ -115,6 +115,13 @@ For each exit status, see [Exit codes](/reference/commands#exit-codes). In the t
 | `desktop_format_unknown` | 3 | Claude keeps its login in a form this Pitboard was not written for, such as a cookie jar of another version. Nothing moved. | [Update Pitboard](/install#update-pitboard). `pitboard doctor` names what differs. |
 | `different_volume` | 3 | Claude's data folder and `~/.pitboard/desktop/parks` are on different volumes, so a switch would copy logins instead of moving them. Nothing moved. | Keep Pitboard's directory on the same disk as your home folder. |
 | `live_usage_not_allowed` | 1 | `pitboard desktop live-usage enable` could not read Claude's encryption key. The message says why: macOS can ask only on the Mac's own screen, you chose Deny or the password was not accepted, nobody answered, Claude has no key or session yet, or the key does not open Claude's cookies. macOS reports Deny and a wrong password the same way. | Do what the message says, then run the command again. Run it from Terminal on the Mac itself, and choose **Always Allow**. If nobody answered, the dialog may still be on screen: click **Deny** to close it first. |
+| `desktop_code_switching` | 1 | An interrupted Desktop switch has not finished. | Finish or recover the switch, then open Code again. |
+| `desktop_code_identity_changed` | 1 | The selected Desktop login belongs to another account. | Check the account in Desktop, quit it and enrol it again. |
+| `desktop_code_unavailable` | 1 | Desktop has no usable Code access, or it has expired. | Open the account in Desktop, use its **Code** feature and try again. |
+| `desktop_code_key_unavailable` | 1 | macOS did not provide Claude's encryption key. | Run the command from Terminal on the Mac and answer the keychain dialog. |
+| `desktop_code_verification_failed` | 1 | The service could not verify the selected account and organisation. | Check the account and connection, then try again. |
+| `desktop_code_managed_settings` | 1 | Managed settings can override the selected account's authentication. | Use a separately signed-in Code account under that policy. |
+| `desktop_code_launch_failed` | 1 | Claude Code could not start. | Check that Claude Code is installed and the command is on your shell's `PATH`. |
 | `claude_desktop_missing`, `claude_desktop_not_found` | 1 | The Claude app was not found where Pitboard looks for it, `/Applications/Claude.app`. | Install Claude Desktop, open it once, then try again. |
 
 Claude Desktop also uses codes from earlier sections. `live_credential_absent` means Claude is signed out. `nothing_parked`, `parked_credential_missing` and `parked_credential_corrupt` refer to a park folder in `~/.pitboard/desktop/parks`, and `parked_login_expired` means its sign-in lapsed. For these, the advice is to run `pitboard use desktop --signed-out`, sign in to the account in Claude, quit Claude, then run `pitboard enroll desktop/<label>`.
@@ -147,7 +154,7 @@ The app quits Claude itself, so it shows `app_still_open` only when Claude does 
 | Code | Exit | Meaning | What to do |
 | --- | --- | --- | --- |
 | `checks_failed` | 3 | `pitboard doctor` found at least one broken check. `data.checks` lists every check. | Follow the advice under each broken check. |
-| `output_is_not_a_report` | 2 | `pitboard completions` or `pitboard manpage` was given `--json`. They print a generated file to standard output, so they have no JSON form. | Run the command without `--json`. |
+| `output_is_not_a_report` | 2 | `pitboard completions`, `pitboard manpage` or `pitboard desktop code` was given `--json`. Generated files and interactive Code sessions have no JSON form. | Run the command without `--json`. |
 
 ## Cause codes
 
@@ -186,5 +193,7 @@ A warning does not stop the command. The Pitboard window shows it in the notice 
 | `strays_kept` | **Claude Desktop files were set aside** | Items in Claude's data folder belonged to neither account, so Pitboard set them aside in `~/.pitboard/desktop/strays` rather than delete them. |
 | `replaced_outside_pitboard` | **Claude was signed in outside Pitboard** | Claude Desktop was signed in to another account outside Pitboard, and the account recorded in use had no parked login to keep, so it is no longer recorded in use. Enrol it again to switch back to it. |
 | An error code, such as `config_write_failed` or `renewal_failed` | **Pitboard has a warning** | That error happened without stopping the command. See the code's row earlier. |
+
+`twin_not_enrolled` appears only after `pitboard use --both`: the other Claude app has no account enrolled for the same claude.ai account, so Pitboard switched only the one you named. Enrol the account in the other app to switch both.
 
 `label_unusable` appears only in `pitboard log`, where it records a label refused with `usage`.

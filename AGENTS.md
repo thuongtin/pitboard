@@ -39,8 +39,7 @@ guide; this file is what an agent needs before it touches anything.
 - Never move, write or delete anything in `~/Library/Application Support/Claude`, and never
   write the `Claude Safe Storage` keychain item. Tests point `PITBOARD_CLAUDE_DESKTOP_DIR`
   at a scratch directory and call `common::guard_not_live_dir` before the first write.
-- Never read `Claude Safe Storage` from a test or a script; tests stand in a scripted key
-  in its place.
+- Tests stand in a scripted key for `Claude Safe Storage` rather than reading the real item.
 - Never start, quit or sign out of the Claude app from a test.
 
 ## Check a change

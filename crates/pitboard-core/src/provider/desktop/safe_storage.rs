@@ -39,7 +39,7 @@ pub(crate) const ITEM_ACCOUNT: Option<&str> = None;
 /// Why the password is being read, which decides how long a question may wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyRead {
-    /// Somebody turned live usage on and is at the Mac to answer macOS.
+    /// Somebody requested live usage or a Code session and can answer macOS.
     Approve,
     /// A refresh, which nobody is watching.
     Refresh,

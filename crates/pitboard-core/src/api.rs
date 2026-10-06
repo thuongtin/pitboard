@@ -22,6 +22,10 @@ const AUTH_BASE: &str = "https://platform.claude.com";
 /// Claude Code's own OAuth client, which every login it stores was issued to.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
+pub(crate) fn oauth_client() -> &'static str {
+    CLIENT_ID
+}
+
 /// Where requests go instead, for tests. Nothing else may redirect them, because an address
 /// that answers "this token belongs to account X" decides which account a credential is filed
 /// under. Only loopback is accepted, so a token or an answer never leaves this machine.

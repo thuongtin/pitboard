@@ -266,6 +266,18 @@ impl Pitboard {
         Pitboard { ctx }
     }
 
+    /// Opens a Code session using a Desktop account's existing, verified access grant.
+    /// This never imports or renews the Desktop refresh credential.
+    pub fn desktop_code_session(
+        &self,
+        label: &str,
+    ) -> std::result::Result<
+        crate::desktop_code::DesktopCodeSession,
+        crate::desktop_code::DesktopCodeError,
+    > {
+        crate::desktop_code::prepare(&self.ctx, label)
+    }
+
     /// Who is signed in and what every account has left. Parked logins whose access has
     /// lapsed are renewed first, so every account is asked live.
     ///
@@ -325,6 +337,15 @@ impl Pitboard {
     pub fn account(&self, typed: &str) -> Option<Account> {
         let state = state::load(&self.ctx).ok()?;
         crate::label::resolve(&state, typed).ok().cloned()
+    }
+
+    /// The same claude.ai account enrolled in the other Claude app, as somebody would type
+    /// it, where `typed` names a Claude Code or Claude Desktop account that has one. Read
+    /// without taking the lock, like [`Pitboard::account`].
+    pub fn twin(&self, typed: &str) -> Option<String> {
+        let state = state::load(&self.ctx).ok()?;
+        let key = crate::label::resolve(&state, typed).ok()?.key();
+        state.twin(&key).map(|twin| state.typed(&twin.key()))
     }
 
     pub fn switch_to(&self, typed: &str) -> Changing<Outcome> {

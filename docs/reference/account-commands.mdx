@@ -142,6 +142,7 @@ Before anything moves, Pitboard checks that the parked login belongs to that acc
 | Option | Description |
 | --- | --- |
 | `--signed-out` | Park the account in use and leave the tool signed out, so the next account to sign in to it can be enrolled. For Claude Desktop, which has no sign-in of its own for Pitboard to open |
+| `--both` | Switch the same claude.ai account in the other Claude app too: Claude Desktop along with Claude Code, or Claude Code along with Claude Desktop |
 
 If the account is already in use, `use` prints `work is already signed in.` and moves no login.
 
@@ -180,6 +181,41 @@ Parked personal. Claude Desktop is signed out.
 Open Claude, sign in to the other account, quit Claude, then run
   pitboard enroll desktop/<label>
 ```
+
+`--both` works only for Claude Code and Claude Desktop accounts. Pitboard finds the other app's account by its claude.ai account, whatever its label. To switch Claude Code to `work`, and Claude Desktop to the same claude.ai account:
+
+```sh
+pitboard use work --both
+```
+
+```text
+Switched to work; personal is parked.
+Claude Code sessions already running follow within 33 seconds.
+Switched Claude Desktop to work (was personal).
+Open Claude to use it.
+```
+
+Pitboard switches the account you name first. If that switch fails, the other app stays as it was. If the other app has no account enrolled for the same claude.ai account, Pitboard switches only the one you named and warns with `twin_not_enrolled`. If Desktop is already using the verified account and needs no repair, it stays open. If the second switch fails, the first stands, and the command ends with the second's error.
+
+## `desktop code`
+
+```text
+Usage: pitboard desktop code <LABEL>
+```
+
+`desktop code` opens an interactive Claude Code session using the named Desktop account's existing access. Use its Desktop label, such as `work`. The account must be enrolled in Desktop; a separate Claude Code enrolment is unnecessary.
+
+```sh
+pitboard desktop code work
+```
+
+Pitboard reads Claude's encryption key and verifies the account and organisation before starting Code. macOS may ask for your login password. The command can use the account in use or a parked Desktop account, without switching Desktop.
+
+Desktop remains responsible for renewal. When access expires or is missing, open that account in Desktop, use its **Code** feature and launch another session.
+
+Each launch has its own private configuration. User, project and local settings are skipped; managed settings that override authentication stop the launch. Conversation history is kept separately for each account under `~/.pitboard/desktop/code-sessions/`. Session directories remain after Code exits, including files Code creates.
+
+The command runs interactively and returns Code's exit status. `--json` is refused with `output_is_not_a_report` and exit status 2. See [Claude Desktop errors](/reference/errors#claude-desktop) for failures before Code starts.
 
 ## `forget`
 
