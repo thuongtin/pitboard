@@ -552,7 +552,7 @@ pub fn gather_offline(ctx: &Context, state: &State) -> Report {
             .iter()
             .map(|&which| {
                 let login = LiveLogin {
-                    recorded_uuid: recorded.get(&which).map(|id| id.account_id.clone()),
+                    recorded_uuid: crate::provider::signed_in_account(ctx, which),
                     usage: Some(Err(unasked(which))),
                     ..LiveLogin::default()
                 };
@@ -2770,6 +2770,40 @@ mod tests {
                 .iter()
                 .all(|r| r.provider != ProviderId::Desktop)
         );
+    }
+
+    /// Log out inside Claude leaves `lastKnownAccountUuid` in the config with no session in the
+    /// folder: asked offline, from the folder alone, nobody is signed in to the account the
+    /// config names.
+    #[test]
+    fn offline_a_desktop_account_logged_out_inside_the_app_is_not_signed_in() {
+        let m = crate::switch::harness::desktop_machine("status-offline-logged-out");
+        let app = m.support().with_file_name("Claude.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "").unwrap();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_desktop_app(app.to_string_lossy().into())
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding());
+        let state = crate::state::load(&ctx).unwrap();
+        let signed_in = |report: &Report| {
+            report
+                .rows
+                .iter()
+                .filter(|r| r.provider == ProviderId::Desktop && r.signed_in)
+                .count()
+        };
+        assert_eq!(signed_in(&gather_offline(&ctx, &state)), 1);
+
+        m.mem.plant_cookies(
+            &m.support().join("Cookies"),
+            crate::provider::desktop::types::CookieTable {
+                meta_version: 24,
+                rows: Vec::new(),
+            },
+        );
+        assert_eq!(signed_in(&gather_offline(&ctx, &state)), 0);
     }
 
     /// A reading remembered under the app's usage key comes back with the account's own id,

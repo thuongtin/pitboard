@@ -718,7 +718,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
             from: key_names(&live_keys),
             to: key_names(&incoming_keys),
         },
-        ..TreeJournal::new(ctx, which, &root)
+        ..TreeJournal::new(ctx, which, &root)?
     };
     tree_journal::write(ctx, &journal)?;
     fault::point("tree.journal_written");
@@ -894,7 +894,7 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
             from: key_names(&live_keys),
             to: Vec::new(),
         },
-        ..TreeJournal::new(ctx, which, &root)
+        ..TreeJournal::new(ctx, which, &root)?
     };
     tree_journal::write(ctx, &journal)?;
     fault::point("tree.journal_written");

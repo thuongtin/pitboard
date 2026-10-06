@@ -81,15 +81,20 @@ pub(super) struct TreeJournal {
 
 impl TreeJournal {
     /// A record of nothing yet, for the data folder `root` of `which`.
-    pub(super) fn new(ctx: &Context, which: ProviderId, root: &Path) -> TreeJournal {
-        TreeJournal {
+    pub(super) fn new(ctx: &Context, which: ProviderId, root: &Path) -> Result<TreeJournal> {
+        Ok(TreeJournal {
             kind: KIND.into(),
             version: VERSION,
             provider: which,
             operation: Operation::Switch,
             started_at: ctx.now(),
             support_dir: root.to_path_buf(),
-            device: ctx.host().device_of(root).ok(),
+            device: Some(ctx.host().device_of(root).map_err(|source| {
+                Error::DesktopDataInaccessible {
+                    path: root.to_path_buf(),
+                    source,
+                }
+            })?),
             from_label: None,
             from_uuid: None,
             from_fingerprint: None,
@@ -100,7 +105,7 @@ impl TreeJournal {
             to_park: None,
             items: Vec::new(),
             config_keys: ConfigKeyNames::default(),
-        }
+        })
     }
 
     fn side(&self, label: &Option<String>) -> Option<Key> {
@@ -130,6 +135,11 @@ impl TreeJournal {
         let tree = crate::provider::of(self.provider)
             .tree()
             .ok_or("it names a tool whose login is not a folder")?;
+        // The volume is what tells the folder this run moved items of from another one at the
+        // same path, so a record that does not name it has nothing to check against.
+        if self.device.is_none() {
+            return Err("it does not say which volume it ran on".into());
+        }
         let from = [
             self.from_label.is_some(),
             self.from_uuid.is_some(),
@@ -937,6 +947,31 @@ mod tests {
             );
             assert_eq!(m.inodes(), during, "nothing moved on a guess");
         }
+    }
+
+    /// The volume is what lets recovery tell the folder the run moved items of from another one
+    /// at the same path, so a record that does not name it is corrupt, not one to check
+    /// nothing against.
+    #[test]
+    fn a_tree_journal_that_names_no_volume_is_corrupt() {
+        let m = desktop_machine("no-volume");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let during = m.inodes();
+        let record = path(&m.ctx);
+        let mut whole: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert!(whole["device"].is_number(), "a run records its volume");
+        whole["device"] = serde_json::Value::Null;
+        std::fs::write(&record, whole.to_string()).unwrap();
+        let refused = m.recover().expect_err("no volume to check against");
+        assert!(
+            matches!(refused, Error::RecoveryRecordCorrupt { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(m.inodes(), during, "nothing moved on a guess");
     }
 
     /// The record is what says a run is unfinished, so a run is not finished while it is still

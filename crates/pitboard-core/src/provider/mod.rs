@@ -702,6 +702,20 @@ pub(crate) fn command(ctx: &Context, tool: ProviderId) -> std::process::Command 
     command
 }
 
+/// The account `which` is signed in to, by its own files. A tool whose login is a folder says
+/// it by the session in it: Log out leaves the config naming the account that was there, so
+/// the config alone would call a signed-out folder signed in. Empty when nobody is.
+pub(crate) fn signed_in_account(ctx: &Context, which: ProviderId) -> Option<String> {
+    let tool = of(which);
+    if let Some(tree) = tool.tree()
+        && let Some(root) = tree.root(ctx)
+        && let Ok(found) = tree.identify(ctx, &root)
+    {
+        return Some(found.map(|live| live.account_uuid).unwrap_or_default());
+    }
+    tool.recorded_identity(ctx).map(|id| id.account_id)
+}
+
 /// The implementation for one tool.
 ///
 /// An exhaustive match rather than a lookup, so a tool added to [`ProviderId`] and not to

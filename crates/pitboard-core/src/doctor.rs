@@ -233,20 +233,6 @@ impl ParkFact {
     }
 }
 
-/// The account `which` is signed in to, by its own files. A tool whose login is a folder says
-/// it by the session in it: Log out leaves the config naming the account that was there, so
-/// the config alone would call a signed-out folder signed in. Empty when nobody is.
-fn signed_in_account(ctx: &Context, which: ProviderId) -> Option<String> {
-    let tool = crate::provider::of(which);
-    if let Some(tree) = tool.tree()
-        && let Some(root) = tree.root(ctx)
-        && let Ok(found) = tree.identify(ctx, &root)
-    {
-        return Some(found.map(|live| live.account_uuid).unwrap_or_default());
-    }
-    tool.recorded_identity(ctx).map(|id| id.account_id)
-}
-
 fn park_facts(ctx: &Context, state: &State) -> Vec<ParkFact> {
     // Who each tool's own record says is signed in, asked once per tool and only of a tool
     // that has accounts here. Offline for every tool: Claude Code's config, a Codex login's
@@ -255,7 +241,7 @@ fn park_facts(ctx: &Context, state: &State) -> Vec<ParkFact> {
     let recorded: std::collections::BTreeMap<ProviderId, Option<String>> = ProviderId::ALL
         .iter()
         .filter(|&&which| state.accounts.iter().any(|a| a.provider() == which))
-        .map(|&which| (which, signed_in_account(ctx, which)))
+        .map(|&which| (which, crate::provider::signed_in_account(ctx, which)))
         .collect();
     state
         .accounts
