@@ -802,6 +802,9 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
             strays += 1;
         }
         if item.to_inode.is_some() {
+            // The park was checked before the record was written; a folder inside it that
+            // became a link since would have the rename take what the link points at.
+            inode_of_live(&incoming, &item.path)?;
             move_item(&incoming.join(&item.path), &there)?;
             installed += 1;
             if installed == 1 {
@@ -1888,6 +1891,45 @@ mod tests {
             || switch_to(&m, "there"),
         )
         .expect_err("a linked parent");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            store.join("CURRENT").exists(),
+            "what the link points at stays"
+        );
+    }
+
+    /// The park the incoming account waits in is checked once, before the record is written.
+    /// A folder inside it that became a link since is not followed: a rename from there would
+    /// take what the link points at into Claude's folder.
+    #[test]
+    fn a_park_folder_that_became_a_link_is_not_moved_through() {
+        let m = desktop_machine("park-folder-linked-after-check");
+        let outside = m.support().with_file_name("outside-park-folder");
+        let store = outside.join("https_claude.ai_0.indexeddb.leveldb");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("CURRENT"), "not the park's").unwrap();
+        let indexed = paths::parks_dir(&m.ctx)
+            .join(m.there_park())
+            .join("IndexedDB");
+        std::fs::create_dir_all(indexed.join("https_claude.ai_0.indexeddb.leveldb")).unwrap();
+        std::fs::write(
+            indexed.join("https_claude.ai_0.indexeddb.leveldb/000003.log"),
+            "the park's",
+        )
+        .unwrap();
+        let linked = outside.clone();
+        let refused = fault::meanwhile(
+            "tree.journal_written",
+            move || {
+                let _ = std::fs::remove_dir_all(&indexed);
+                std::os::unix::fs::symlink(&linked, &indexed).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("a linked folder in the park");
         assert!(
             matches!(refused, Error::DesktopDataInaccessible { .. }),
             "{refused:?}"

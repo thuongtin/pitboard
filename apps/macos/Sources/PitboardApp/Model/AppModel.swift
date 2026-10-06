@@ -1253,11 +1253,14 @@ extension AppModel {
     /// while it can see it running.
     static let claudeApp = (bundleID: "com.anthropic.claudefordesktop", name: "Claude")
 
-    /// Whether Settings has anything to say about Claude Desktop: it is installed here, or
-    /// has an account here.
+    /// Whether Settings has anything to say about Claude Desktop: it is installed here, has an
+    /// account here, or live usage is on.
     var desktopShown: Bool {
         installed.contains(desktopProvider)
             || status?.accounts.contains { $0.provider == desktopProvider } == true
+            // Live usage stays on, with its hold on Claude's key, after Claude is removed and
+            // its last account forgotten: the section is where it is turned off.
+            || liveUsage?.enabled == true
     }
 
     /// The Claude app Pitboard quits around a change to Claude Desktop's sign-in.
@@ -1325,6 +1328,14 @@ extension AppModel {
             warnings: warnings(of: error))
     }
 
+    /// What a step of adding an account says when a switch is already running: the second
+    /// would wait behind the first anyway, and its sheet would be showing a stale account.
+    nonisolated private static func switchUnderWay(_ title: String) -> ActionFailure {
+        ActionFailure(
+            title, message: "Another switch is running. Try again when it has finished.",
+            code: "switch_under_way")
+    }
+
     /// The first step of adding a Claude Desktop account: Claude is quit, the account in use
     /// is parked and Claude left signed out, and Claude is opened again for somebody to sign
     /// in to another account. Nothing is signed out on claude.ai. The sheet stays open for
@@ -1332,6 +1343,13 @@ extension AppModel {
     @discardableResult
     func desktopAddAsked() async -> ActionFailure? {
         let title = "Couldn’t put the account in use aside"
+        guard switchUnderWay == nil else { return Self.switchUnderWay(title) }
+        // Claimed before anything is awaited, as a switch claims it: a switch asked for
+        // while Claude quits would otherwise run beside this and leave the sheet naming an
+        // account that is no longer the one in use. A name no account has, so no row
+        // shows it.
+        switching = desktopProvider
+        defer { switching = nil }
         var said: [Warning] = []
         let failure = await quitThen(await desktopApp(), failing: title) { reopening in
             do {
@@ -1367,6 +1385,9 @@ extension AppModel {
     /// network. A failure's warnings stay in the window once the sheet is closed.
     private func enrolDesktop(_ name: String) async -> ActionFailure? {
         let title = "Couldn’t name this account"
+        guard switchUnderWay == nil else { return Self.switchUnderWay(title) }
+        switching = desktopProvider
+        defer { switching = nil }
         let target = qualified(name, for: desktopProvider)
         let failure = await quitThen(await desktopApp(), failing: title) { _ in
             do {

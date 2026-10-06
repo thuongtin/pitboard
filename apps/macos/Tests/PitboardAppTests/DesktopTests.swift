@@ -215,7 +215,9 @@ private final class DesktopCore: Core, @unchecked Sendable {
     func changedAt() async -> Int64 { changed }
     func readingsChangedAt() async -> Int64 { 0 }
     func tools() -> [Tool] { bothTools + [claudeDesktop] }
-    func installed() async -> [Tool] { [claudeCode, claudeDesktop] }
+    /// Whether Claude's app is installed here.
+    var desktopInstalled = true
+    func installed() async -> [Tool] { desktopInstalled ? [claudeCode, claudeDesktop] : [claudeCode] }
     func searchPath() async -> String? { nil }
 }
 
@@ -546,6 +548,41 @@ private func desktopMachine(
 }
 
 // MARK: - Adding an account
+
+/// A switch asked for while Claude quits for an add would run beside it and leave the sheet
+/// naming an account that is no longer in use, so both steps hold the switch guard and a
+/// switch asked for meanwhile waits.
+@MainActor
+@Test func anAddHoldsTheSwitchGuardWhileClaudeQuits() async throws {
+    let (model, _, _, _) = desktopMachine()
+    await model.refresh()
+    model.present(.add(provider: "desktop"))
+    let add = Task { await model.desktopAddAsked() }
+    var held = false
+    for _ in 0..<500 where !held {
+        held = model.switchUnderWay != nil
+        if !held { try await Task.sleep(for: .milliseconds(1)) }
+    }
+    #expect(held, "the add claimed the guard before Claude was quit")
+    #expect(await add.value == nil)
+    #expect(model.switchUnderWay == nil, "and let it go when it finished")
+}
+
+/// Live usage goes on holding Claude's key after Claude is removed and its last account
+/// forgotten, so Settings keeps the section where it is turned off.
+@MainActor
+@Test func settingsKeepClaudeDesktopWhileLiveUsageIsOn() async throws {
+    let (model, core, _, _) = desktopMachine()
+    core.desktopInstalled = false
+    core.accounts = []
+    core.live = LiveUsageState(enabled: true, approval: "granted", reason: nil, lastOkAt: 1)
+    await model.refresh()
+    #expect(model.desktopShown)
+
+    core.live = LiveUsageState(enabled: false, approval: "unknown", reason: nil, lastOkAt: nil)
+    await model.refresh()
+    #expect(!model.desktopShown)
+}
 
 /// Adding a second Claude account: Claude is quit, the account in use is parked and Claude
 /// left signed out, Claude opens for the sign-in, and once it is named, Claude is quit

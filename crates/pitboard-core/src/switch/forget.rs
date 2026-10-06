@@ -21,11 +21,14 @@ fn live_account(ctx: &Context, which: ProviderId) -> Live {
     let tool = provider::of(which);
     if let Some(tree) = tool.tree()
         && let Some(root) = tree.root(ctx)
-        && let Ok(found) = tree.identify(ctx, &root)
     {
-        return match found {
-            Some(live) => Live::Account(live.account_uuid),
-            None => Live::SignedOut,
+        // A session that cannot be read is not a session that is absent, and the config
+        // beside it may name another account than the one the app holds. Nothing to go by,
+        // rather than the config's word for it.
+        return match tree.identify(ctx, &root) {
+            Ok(Some(live)) => Live::Account(live.account_uuid),
+            Ok(None) => Live::SignedOut,
+            Err(_) => Live::Unknown,
         };
     }
     tool.recorded_identity(ctx)
@@ -85,4 +88,34 @@ pub fn forget(settled: Settled, key: &Key) -> Result<(String, Vec<Warning>)> {
             .into_iter()
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::harness::desktop_machine;
+    use super::*;
+    use crate::switch::settle;
+
+    /// A jar that cannot be read says nothing of who is signed in, and the config beside it
+    /// may name another account than the one the app holds. Pitboard's own record of the
+    /// last switch is what is left to go by, so the account it names is not forgotten.
+    #[test]
+    fn an_unreadable_jar_leaves_the_record_of_the_active_account_in_charge() {
+        let m = desktop_machine("forget-unreadable-jar");
+        let config_path = m.support().join("config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["lastKnownAccountUuid"] = serde_json::json!("there");
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        m.mem.jar_fails(std::io::ErrorKind::InvalidData);
+
+        let settled = settle(&m.ctx, None).expect("nothing to recover").0;
+        let refused = forget(settled, &Key::new(ProviderId::Desktop, "here"))
+            .expect_err("the account Pitboard last switched to");
+
+        assert!(
+            matches!(refused, Error::CannotForgetActiveAccount { .. }),
+            "{refused:?}"
+        );
+    }
 }

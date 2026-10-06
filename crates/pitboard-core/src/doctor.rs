@@ -132,6 +132,10 @@ pub struct DesktopFacts {
     /// Why the cookie database could not be read, where there is one and it could not.
     /// A database that is not there is no failure.
     pub cookies_error: Option<String>,
+    /// Why the app's `config.json` could not be read, where there is one and it could not.
+    /// A switch reads it before it moves anything, so a healthy jar beside a config that
+    /// cannot be read is still a folder Pitboard will not switch.
+    pub config_error: Option<String>,
     /// Whether the two copies of the session cookie disagree.
     pub twins_differ: bool,
     /// Whether only this user can reach the parks directory. `None` where there is none.
@@ -385,6 +389,13 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
         .map(ToString::to_string);
     let table = table.and_then(Result::ok);
+    let config_error = support_dir
+        .as_ref()
+        .filter(|root| root.is_dir())
+        .and_then(|root| {
+            crate::provider::desktop::config::read_keys(&paths::config_file(root)).err()
+        })
+        .map(|error| error.to_string());
     // Where the parks are, or where Pitboard would make them.
     let parks_home = [parks_dir.clone(), paths::desktop_home(ctx), home::dir(ctx)]
         .into_iter()
@@ -443,6 +454,7 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         same_volume,
         cookies_meta_version: table.as_ref().map(|t| t.meta_version),
         cookies_error,
+        config_error,
         twins_differ: table.as_ref().is_some_and(cookies::twins_differ),
         parks_dir_private,
         parks: park_names.len(),
@@ -1824,6 +1836,32 @@ fn judge_desktop(facts: &DesktopFacts, parks: &[&ParkFact], now: i64) -> Vec<Che
             advice,
         ));
     }
+    if let Some(reason) = &facts.config_error {
+        // The app rewrites its config as it runs, so while it is open this is only a warning.
+        let running = facts
+            .running
+            .as_ref()
+            .is_some_and(|holding| !holding.is_empty());
+        let (level, advice) = if running {
+            (
+                warn as fn(_, _, _, _) -> Check,
+                "Claude is open and may be writing it. Run `pitboard doctor` again once it is closed.",
+            )
+        } else {
+            (
+                fail as fn(_, _, _, _) -> Check,
+                "Pitboard cannot read which account Claude Desktop holds, so it will not enrol \
+                 or switch it. Nothing has been moved. Quit Claude and check `config.json` in \
+                 its data folder.",
+            )
+        };
+        checks.push(level(
+            "desktop_config_unreadable",
+            "Claude Desktop config",
+            format!("the config could not be read: {reason}"),
+            advice,
+        ));
+    }
     if facts.same_volume == Some(false) {
         checks.push(fail(
             "desktop_different_volume",
@@ -2063,6 +2101,7 @@ fn desktop_environment(facts: &DesktopFacts) -> Value {
         "same_volume": facts.same_volume,
         "cookies_meta_version": facts.cookies_meta_version,
         "cookies_error": facts.cookies_error,
+        "config_error": facts.config_error,
         "parks_dir_private": facts.parks_dir_private,
         "parks": facts.parks,
         "orphan_parks": facts.orphan_parks,
@@ -3640,6 +3679,7 @@ mod tests {
             same_volume: Some(true),
             cookies_meta_version: Some(24),
             cookies_error: None,
+            config_error: None,
             twins_differ: false,
             parks_dir_private: Some(true),
             parks: 1,
@@ -3746,6 +3786,26 @@ mod tests {
                 DesktopFacts {
                     cookies_meta_version: None,
                     cookies_error: Some("database is locked".into()),
+                    running: Some(vec![crate::holder::Holding {
+                        holder: crate::provider::codex::holders::HOLDERS[0],
+                        pids: vec![1],
+                    }]),
+                    ..desktop()
+                },
+            ),
+            (
+                "desktop_config_unreadable",
+                Level::Fail,
+                DesktopFacts {
+                    config_error: Some("not JSON".into()),
+                    ..desktop()
+                },
+            ),
+            (
+                "desktop_config_unreadable",
+                Level::Warn,
+                DesktopFacts {
+                    config_error: Some("not JSON".into()),
                     running: Some(vec![crate::holder::Holding {
                         holder: crate::provider::codex::holders::HOLDERS[0],
                         pids: vec![1],
@@ -3910,6 +3970,23 @@ mod tests {
         let checks = evaluate(&facts);
         assert_eq!(
             level_of(&checks, "desktop_cookies_unreadable"),
+            Some(Level::Fail)
+        );
+    }
+
+    /// A healthy cookie jar beside a config that cannot be read is a folder every enrolment
+    /// and switch refuses, so doctor fails it rather than reporting the cookies alone.
+    #[test]
+    fn an_unreadable_config_is_a_failure_doctor_says() {
+        let m = desktop_doctor("unreadable-config");
+        std::fs::write(m.support().join("config.json"), "{not json").unwrap();
+        let facts = gather(&m.ctx);
+        let desktop = facts.desktop.as_ref().expect("a Claude Desktop section");
+        assert!(desktop.cookies_error.is_none());
+        assert!(desktop.config_error.is_some());
+        let checks = evaluate(&facts);
+        assert_eq!(
+            level_of(&checks, "desktop_config_unreadable"),
             Some(Level::Fail)
         );
     }

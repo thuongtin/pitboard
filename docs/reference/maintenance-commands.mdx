@@ -274,6 +274,7 @@ When Codex's checks appear and Claude Code is absent, `doctor` leaves out most o
   | `desktop_cookies` | `Claude Desktop cookies` | The version of Claude's cookie database is one Pitboard reads. |
   | `desktop_format_unknown` | `Claude Desktop cookies` | In place of `desktop_cookies` when the version is another. Always fails. |
   | `desktop_cookies_unreadable` | `Claude Desktop cookies` | In place of `desktop_cookies` when the cookie database is there and cannot be read. Fails, or warns while Claude is open and may be writing it. |
+  | `desktop_config_unreadable` | `Claude Desktop config` | When Claude's `config.json` is there and cannot be read. Fails, or warns while Claude is open and may be writing it. |
   | `desktop_data_folder_missing` | `Claude Desktop data` | Only when an account is enrolled or a switch waits and Claude's data folder is gone. Always fails. |
   | `desktop_different_volume` | `Claude Desktop volume` | Only when Claude's data folder and Pitboard's parks are on different volumes. Always fails. |
   | `desktop_parks_not_private` | `Claude Desktop parks` | Only when others can reach the directory holding Claude Desktop parks. Always fails. |
