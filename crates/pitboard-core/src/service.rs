@@ -303,6 +303,11 @@ impl Pitboard {
             }
         }
         warnings.extend(switch::tree_waiting(&self.ctx, &state));
+        warnings.extend(switch::tree_parks_expiring(
+            &self.ctx,
+            &state,
+            ProviderId::Desktop,
+        ));
         Ok(Done {
             value: status::gather(&self.ctx, &state, fresh),
             warnings,
@@ -322,6 +327,11 @@ impl Pitboard {
             value: status::gather_offline(&self.ctx, &state),
             warnings: switch::tree_waiting(&self.ctx, &state)
                 .into_iter()
+                .chain(switch::tree_parks_expiring(
+                    &self.ctx,
+                    &state,
+                    ProviderId::Desktop,
+                ))
                 .collect(),
         })
     }
@@ -1200,6 +1210,33 @@ mod tests {
             "the refusal says it: {:?}",
             failed.warnings
         );
+    }
+
+    /// Nothing renews a parked Claude Desktop login, so the periodic read is where somebody
+    /// hears one is about to lapse: waiting for the next switch to say so is too late.
+    #[test]
+    fn a_status_read_says_a_parked_desktop_login_is_running_out() {
+        use crate::switch::harness::{NOW, desktop_machine};
+        let m = desktop_machine("service-expiring");
+        let mut state = state::load(&m.ctx).unwrap();
+        let key = state
+            .accounts
+            .iter()
+            .find(|a| a.provider() == ProviderId::Desktop && a.parked.is_some())
+            .map(Account::key)
+            .expect("a parked account");
+        let mut account = state.get(&key).unwrap().clone();
+        account.parked.as_mut().unwrap().refresh_expires_at = Some(NOW + 86_400);
+        state.upsert(account);
+        state::save(&m.ctx, &state).unwrap();
+        let pitboard = Pitboard::new(m.ctx.clone());
+
+        let offline = pitboard.status_offline().expect("read");
+        let online = pitboard.status(false).expect("read");
+        for (read, done) in [("offline", offline), ("online", online)] {
+            let codes: Vec<_> = done.warnings.iter().map(Warning::code).collect();
+            assert_eq!(codes, ["park_expires_soon"], "{read}");
+        }
     }
 
     /// A Claude Desktop switch that fails partway keeps its record, and the failure says so:

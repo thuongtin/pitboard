@@ -37,7 +37,9 @@ pub use journal::{Abandoned, Recovered, pending as interrupted};
 pub use rename::rename;
 pub use renew::{Due, Renewal, renew_due, renew_parked};
 pub use tree::{Awaiting, awaiting_sign_in, sign_out};
-pub(crate) use tree::{check_park as check_tree_park, note_organization};
+pub(crate) use tree::{
+    check_park as check_tree_park, expiring as tree_parks_expiring, note_organization,
+};
 pub use tree_journal::pending as tree_interrupted;
 pub use tree_journal::unfinished as tree_unfinished;
 pub use tree_journal::waiting as tree_waiting;

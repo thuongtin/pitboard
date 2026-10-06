@@ -11,7 +11,7 @@ On macOS, parked logins are keychain items whose names start with `pitboard-park
 
 A Claude Code parked login holds the account's OAuth block, plus any `organizationUuid`, `trustedDeviceToken`, `enterpriseGateway` or `designOauth` stored beside it. Whether restoring a device token spares a re-verification has not been measured. A Codex parked login is Codex's whole login file, `~/.codex/auth.json`.
 
-A Claude Desktop parked login is a folder in `~/.pitboard/desktop/parks/`, at mode 0700. It holds Claude's cookie jar, its storage folders and the three keys of its `config.json` that Pitboard moves with the account, which on 4 October 2026 were enough to move each of two accounts whole. The session cookie stays encrypted with Claude's key, as it was in Claude's data folder. Pitboard moves these files by rename, so no copy stays behind.
+A Claude Desktop parked login is a folder in `~/.pitboard/desktop/parks/`, at mode 0700. It holds Claude's cookie jar, its storage folders and three keys of its `config.json`. Pitboard moves these with the account. On 4 October 2026 they were enough to move each of two accounts whole. The session cookie stays encrypted with Claude's key, as it was in Claude's data folder. Pitboard moves these files by rename, so no copy stays behind.
 
 On Linux, parked logins are files in `~/.pitboard/vault/`, at mode 0600 in a 0700 directory. Any process running as you can read them, as it can the login in use, which each tool keeps in a file at mode 0600.
 

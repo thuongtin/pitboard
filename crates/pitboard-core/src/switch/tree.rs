@@ -613,7 +613,7 @@ fn park_out(
 }
 
 /// Every Claude Desktop park running out within a week, which nothing can renew.
-fn expiring(ctx: &Context, state: &State, which: ProviderId) -> Vec<Warning> {
+pub(crate) fn expiring(ctx: &Context, state: &State, which: ProviderId) -> Vec<Warning> {
     state
         .accounts
         .iter()
@@ -1912,6 +1912,31 @@ mod tests {
         std::fs::remove_dir_all(awaiting_path(&m.ctx)).unwrap();
         m.recover().expect("recovered once the wait can go");
         assert!(tree_journal::pending(&m.ctx).is_none());
+        assert!(awaiting_sign_in(&m.ctx).is_none());
+    }
+
+    /// Enrolling has no journal, so what finishes it after a wait that cannot be removed is
+    /// asking again: the account is already recorded, and the second run takes the same
+    /// path as an account signed in again, which removes the wait.
+    #[test]
+    fn enrolling_again_finishes_an_add_whose_wait_could_not_be_removed() {
+        let m = desktop_machine("enrol-wait-stuck");
+        signing_out(&m).expect("signed out");
+        m.plant_live("new", "v10new");
+        let wait = awaiting_path(&m.ctx);
+        std::fs::remove_file(&wait).expect("the wait signing out wrote");
+        std::fs::create_dir_all(wait.join("not-a-file")).unwrap();
+        enrolling(&m, "new").expect_err("the wait cannot be removed");
+        assert!(
+            state::load(&m.ctx)
+                .unwrap()
+                .get(&Key::new(ProviderId::Desktop, "new"))
+                .is_some(),
+            "the account is recorded"
+        );
+
+        std::fs::remove_dir_all(&wait).unwrap();
+        enrolling(&m, "new").expect("asked again");
         assert!(awaiting_sign_in(&m.ctx).is_none());
     }
 

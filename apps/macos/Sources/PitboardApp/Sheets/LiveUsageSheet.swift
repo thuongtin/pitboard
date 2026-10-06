@@ -16,8 +16,9 @@ struct LiveUsageSheet: View {
             title: "Show live usage for Claude Desktop?",
             message: "Claude encrypts its sign-in with a key in your login keychain. To ask "
                 + "claude.ai how much each account has left, Pitboard reads that key. macOS "
-                + "asks for your login password once: choose Always Allow so it never asks "
-                + "again. Always Allow lets any program that runs /usr/bin/security read this "
+                + "asks for your login password: choose Always Allow so it does not ask "
+                + "again for this key. If Claude replaces the key, macOS may ask once more. "
+                + "Always Allow lets any program that runs /usr/bin/security read this "
                 + "key. Pitboard only reads it, keeps it in memory, and never writes it. "
                 + "Switching accounts never needs it."
         ) {

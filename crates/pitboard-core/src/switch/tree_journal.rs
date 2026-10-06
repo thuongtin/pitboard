@@ -711,11 +711,13 @@ pub(super) fn abandon(ctx: &Context, state: &mut State) -> Result<Option<Abandon
     let mut kept = 0;
     for park in [&journal.from_park, &journal.to_park].into_iter().flatten() {
         let dir = parks.join(park);
-        kept += journal
-            .items
-            .iter()
-            .filter(|item| std::fs::symlink_metadata(dir.join(&item.path)).is_ok())
-            .count();
+        // A login, however many items it is made of, is kept once.
+        kept += usize::from(
+            journal
+                .items
+                .iter()
+                .any(|item| std::fs::symlink_metadata(dir.join(&item.path)).is_ok()),
+        );
     }
     let (from, to) = journal.named(state);
     clear(ctx)?;
@@ -1004,6 +1006,20 @@ mod tests {
         assert!(abandoned.is_some());
         assert!(pending(&m.ctx).is_none());
         assert_eq!(m.inodes(), during);
+    }
+
+    /// A Desktop login is several items, so `kept` counts the logins the record names that
+    /// still hold something, at most the two it moves between, not the items in them.
+    #[test]
+    fn abandoning_a_desktop_switch_counts_logins_not_items() {
+        let m = desktop_machine("abandon-count");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let abandoned = super::super::abandon(&m.ctx).unwrap().expect("a record");
+        assert_eq!(abandoned.kept, 2);
+        assert!(pending(&m.ctx).is_none());
     }
 
     /// A home copied from another Mac while a Desktop switch was unfinished: its record names

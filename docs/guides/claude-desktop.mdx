@@ -137,7 +137,7 @@ To see what each account has left as claude.ai counts it, with reset times, turn
   </Tab>
 </Tabs>
 
-Pitboard reads Claude's encryption key, the keychain item `Claude Safe Storage`, once. macOS asks for your login password: choose **Always Allow** so it does not ask again. After that, Pitboard read the key from a background shell with nobody at the Mac. Reads over SSH or from a scheduled job have not been measured. Pitboard reads the item through `/usr/bin/security`. Always Allow may therefore let other programs that run it read the item. That has not been measured either. Switching never needs the key.
+Pitboard reads Claude's encryption key, the keychain item `Claude Safe Storage`, once. macOS asks for your login password: choose **Always Allow** so it does not ask again for this key. If Claude replaces the key, macOS may ask once more. After that, Pitboard read the key from a background shell with nobody at the Mac. Reads over SSH or from a scheduled job have not been measured. Pitboard reads the item through `/usr/bin/security`. Always Allow may therefore let other programs that run it read the item. That has not been measured either. Switching never needs the key.
 
 Pitboard waits 2 minutes for an answer when you turn live usage on, and 10 seconds on a later read. When it stops waiting, the dialog can stay on screen. Click **Deny** to close it, then turn live usage on again. After a later read stops waiting, Pitboard does not ask again until you turn live usage on again. Each time turning it on runs out of time can leave a dialog, and so can the app and a command reading at once.
 

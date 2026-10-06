@@ -287,7 +287,7 @@ fn live_owner_by_fingerprint(ctx: &Context, journal: &Journal) -> Option<String>
 pub struct Abandoned {
     pub from: String,
     pub to: String,
-    /// Copies kept rather than deleted, because which one is live is now unknown.
+    /// Logins kept rather than deleted, because which one is live is now unknown.
     pub kept: usize,
 }
 
