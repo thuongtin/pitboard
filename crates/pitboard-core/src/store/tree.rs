@@ -46,7 +46,7 @@ pub(crate) fn moved_not_synced(error: &io::Error) -> Option<&MovedNotSynced> {
 ///
 /// Every error but one means nothing moved. The one is a sync that failed after the
 /// rename, when the item is at `to`: that error carries a [`MovedNotSynced`], which
-/// [`moved_not_synced`] finds, so a caller records the move as made.
+/// [`moved_not_synced`] finds, so a caller can say where the item is.
 pub(crate) fn rename_durably(from: &Path, to: &Path) -> io::Result<u64> {
     match std::fs::symlink_metadata(to) {
         Ok(_) => {

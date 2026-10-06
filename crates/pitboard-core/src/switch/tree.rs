@@ -211,18 +211,18 @@ pub(super) fn inode_at(path: &Path) -> Result<Option<u64>> {
     })
 }
 
-/// One item moved by one rename. A move made and then not synced is a move made.
+/// One item moved by one rename. A move made and then not synced is an error too, though
+/// the item is where it was moved to: it is not on disk yet, so the run stops with its
+/// record, which settles by where each item is, rather than carry on to delete the record
+/// and the park behind a move a power cut could take back.
 pub(super) fn move_item(from: &Path, to: &Path) -> Result<u64> {
-    match moves::rename_durably(from, to) {
-        Ok(inode) => Ok(inode),
-        Err(e) => match moves::moved_not_synced(&e) {
-            Some(moved) => Ok(moved.inode),
-            None => Err(Error::DesktopDataInaccessible {
-                path: from.to_path_buf(),
-                source: e,
-            }),
+    moves::rename_durably(from, to).map_err(|e| Error::DesktopDataInaccessible {
+        path: match moves::moved_not_synced(&e) {
+            Some(moved) => moved.to.clone(),
+            None => from.to_path_buf(),
         },
-    }
+        source: e,
+    })
 }
 
 /// `value` as JSON at `path`, readable by this user only.
@@ -1672,6 +1672,31 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(m.inodes(), before);
+    }
+
+    /// A move that was made but could not be synced is not on disk yet, so the run stops
+    /// there with its record kept, rather than carry on to delete the record and the park
+    /// behind a move a power cut could take back.
+    #[test]
+    fn a_move_that_cannot_be_synced_stops_the_switch_with_its_record() {
+        use crate::store::tree::SYNC_FAILS;
+        let m = desktop_machine("unsynced-move");
+        let failed = fault::meanwhile(
+            "tree.item_parked",
+            || SYNC_FAILS.with(|fails| fails.set(true)),
+            || switch_to(&m, "there"),
+        );
+        SYNC_FAILS.with(|fails| fails.set(false));
+        let refused = failed.expect_err("the next move is not synced");
+        assert!(
+            matches!(&refused, Error::DesktopDataInaccessible { source, .. }
+                if source.to_string().contains("could not be synced")),
+            "{refused:?}"
+        );
+        assert!(
+            crate::switch::tree_interrupted(&m.ctx).is_some(),
+            "the record is kept for the next change"
+        );
     }
 
     /// A nested item whose parent folder in the park is a link would be moved out of
