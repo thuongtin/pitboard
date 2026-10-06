@@ -233,6 +233,20 @@ impl ParkFact {
     }
 }
 
+/// The account `which` is signed in to, by its own files. A tool whose login is a folder says
+/// it by the session in it: Log out leaves the config naming the account that was there, so
+/// the config alone would call a signed-out folder signed in. Empty when nobody is.
+fn signed_in_account(ctx: &Context, which: ProviderId) -> Option<String> {
+    let tool = crate::provider::of(which);
+    if let Some(tree) = tool.tree()
+        && let Some(root) = tree.root(ctx)
+        && let Ok(found) = tree.identify(ctx, &root)
+    {
+        return Some(found.map(|live| live.account_uuid).unwrap_or_default());
+    }
+    tool.recorded_identity(ctx).map(|id| id.account_id)
+}
+
 fn park_facts(ctx: &Context, state: &State) -> Vec<ParkFact> {
     // Who each tool's own record says is signed in, asked once per tool and only of a tool
     // that has accounts here. Offline for every tool: Claude Code's config, a Codex login's
@@ -241,10 +255,7 @@ fn park_facts(ctx: &Context, state: &State) -> Vec<ParkFact> {
     let recorded: std::collections::BTreeMap<ProviderId, Option<String>> = ProviderId::ALL
         .iter()
         .filter(|&&which| state.accounts.iter().any(|a| a.provider() == which))
-        .map(|&which| {
-            let found = crate::provider::of(which).recorded_identity(ctx);
-            (which, found.map(|id| id.account_id))
-        })
+        .map(|&which| (which, signed_in_account(ctx, which)))
         .collect();
     state
         .accounts
@@ -3788,6 +3799,34 @@ mod tests {
             .expect("there's park");
         assert_eq!(there.unreadable, None);
         assert!(there.park.is_some());
+    }
+
+    /// Log out inside Claude removes the session and leaves `lastKnownAccountUuid` behind, so
+    /// the account that config names is not signed in, and doctor must not say it is.
+    #[test]
+    fn a_claude_desktop_account_logged_out_inside_the_app_is_not_active() {
+        let m = desktop_doctor("logged-out");
+        let state = crate::state::load(&m.ctx).unwrap();
+        let active = |facts: Vec<ParkFact>| {
+            facts
+                .into_iter()
+                .filter(|f| f.provider == ProviderId::Desktop && f.active)
+                .map(|f| f.label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(active(park_facts(&m.ctx, &state)), ["here"]);
+
+        m.mem.plant_cookies(
+            &m.support().join("Cookies"),
+            crate::provider::desktop::types::CookieTable {
+                meta_version: 24,
+                rows: Vec::new(),
+            },
+        );
+        assert!(
+            active(park_facts(&m.ctx, &state)).is_empty(),
+            "nobody is signed in"
+        );
     }
 
     /// What doctor reads of Claude Desktop, read off disk without asking the keychain for

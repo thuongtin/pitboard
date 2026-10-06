@@ -431,11 +431,20 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
                 }
             }
         }
+        // The keys are kept before the first item moves, so with an item to move back they
+        // are there. Gone, nothing is moved: the config the app may have rewritten since
+        // could not be put back, and a retry would find the items home and finish as though
+        // it could.
+        let kept = from_park.join(CONFIG_KEYS_FILE);
+        if steps.iter().any(|step| matches!(step, Step::Move(..))) && !kept.is_file() {
+            return Err(undetermined(
+                "the config keys kept before the first move are gone".into(),
+            ));
+        }
         let mut strays = moves::Strays::new();
         take(ctx, which, steps, &mut strays)?;
         // The app may have rewritten its config once the items were gone, so the keys kept
         // before the first move go back with them, unless it is as it was.
-        let kept = from_park.join(CONFIG_KEYS_FILE);
         if kept.is_file() {
             tree::still_quiet(ctx, which)?;
             let config = paths::config_file(&root);
@@ -561,6 +570,10 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         }
     }
     clear(ctx)?;
+    if journal.operation == Operation::Switch {
+        // Somebody is signed in again, so a sign-out waiting for one is over.
+        tree::clear_awaiting(ctx)?;
+    }
     Ok(Recovered {
         from,
         to,
@@ -957,6 +970,54 @@ mod tests {
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         refused.expect_err("the record could not be looked up");
         assert!(path(&m.ctx).is_file(), "the record is still there");
+    }
+
+    /// The keys kept before the first move are what put the config back when a switch is
+    /// undone. Gone, with an item still to move back, recovery would complete without them
+    /// and pair the returned session with whatever the app wrote: it refuses, and moves
+    /// nothing.
+    #[test]
+    fn undoing_a_park_whose_kept_config_keys_are_gone_is_refused() {
+        let m = desktop_machine("undo-keys-gone");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let during = m.inodes();
+        let journal = read(&m.ctx).unwrap().expect("a journal");
+        let kept = paths::parks_dir(&m.ctx)
+            .join(journal.from_park.expect("an outgoing park"))
+            .join(CONFIG_KEYS_FILE);
+        std::fs::remove_file(&kept).unwrap();
+        let refused = m.recover().expect_err("the keys are gone");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(m.inodes(), during, "nothing moved on a guess");
+        assert!(path(&m.ctx).is_file(), "the record is kept");
+    }
+
+    /// Somebody is signed in once a switch is recovered forward, so a sign-out that an add
+    /// was waiting on is over, as it is when the switch runs through.
+    #[test]
+    fn finishing_a_switch_ends_the_sign_in_wait() {
+        let m = desktop_machine("finish-ends-wait");
+        assert_eq!(
+            m.crash_at("tree.park_recorded").unwrap_err(),
+            "tree.park_recorded"
+        );
+        tree::write_awaiting(
+            &m.ctx,
+            &tree::Awaiting {
+                from_label: "here".into(),
+                started_at: NOW,
+            },
+        )
+        .unwrap();
+        let recovered = m.recover().expect("recovered").expect("found");
+        assert!(recovered.finished);
+        assert_eq!(tree::awaiting_sign_in(&m.ctx), None);
     }
 
     #[test]
