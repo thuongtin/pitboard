@@ -272,7 +272,7 @@ When Codex's checks appear and Claude Code is absent, `doctor` leaves out most o
   | `desktop_version` | `Claude Desktop build` | The installed Claude Desktop version matches the one Pitboard's facts were read from. Always `ok`. |
   | `desktop_version_unverified` | `Claude Desktop build` | In place of `desktop_version` when the installed version differs or its bundle does not say. Always warns. |
   | `desktop_cookies` | `Claude Desktop cookies` | The version of Claude's cookie database is one Pitboard reads. |
-  | `desktop_format_unknown` | `Claude Desktop cookies` | In place of `desktop_cookies` when the version is another. Always fails. |
+  | `desktop_format_unknown` | `Claude Desktop cookies` | In place of `desktop_cookies` when the version is another, or a cookie is not encrypted the way Pitboard reads. Always fails. |
   | `desktop_cookies_unreadable` | `Claude Desktop cookies` | In place of `desktop_cookies` when the cookie database is there and cannot be read. Fails, or warns while Claude is open and may be writing it. |
   | `desktop_config_unreadable` | `Claude Desktop config` | When Claude's `config.json` is there and cannot be read. Fails, or warns while Claude is open and may be writing it. |
   | `desktop_data_folder_missing` | `Claude Desktop data` | Only when an account is enrolled or a switch waits and Claude's data folder is gone. Always fails. |

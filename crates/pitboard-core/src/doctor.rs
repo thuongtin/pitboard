@@ -129,6 +129,9 @@ pub struct DesktopFacts {
     pub same_volume: Option<bool>,
     /// The cookie database's `meta.version`, where there is one that could be read.
     pub cookies_meta_version: Option<u32>,
+    /// The name of a cookie in that jar whose value is not in the encryption Pitboard reads,
+    /// where one was found: every enrolment and switch refuses such a jar.
+    pub cookies_odd_value: Option<String>,
     /// Why the cookie database could not be read, where there is one and it could not.
     /// A database that is not there is no failure.
     pub cookies_error: Option<String>,
@@ -453,6 +456,10 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         data_dir_missing,
         same_volume,
         cookies_meta_version: table.as_ref().map(|t| t.meta_version),
+        cookies_odd_value: table.as_ref().and_then(|t| match cookies::session(t) {
+            Err(cookies::DesktopFormat::Prefix(name)) => Some(name),
+            _ => None,
+        }),
         cookies_error,
         config_error,
         twins_differ: table.as_ref().is_some_and(cookies::twins_differ),
@@ -1790,6 +1797,16 @@ fn judge_desktop(facts: &DesktopFacts, parks: &[&ParkFact], now: i64) -> Vec<Che
             format!(
                 "the cookie database is version {found}; Pitboard reads version {}",
                 cookies::EXPECTED_META
+            ),
+            "Pitboard will not switch Claude Desktop accounts until it understands this \
+             format. Nothing has been moved.",
+        )),
+        Some(_) if facts.cookies_odd_value.is_some() => checks.push(fail(
+            "desktop_format_unknown",
+            "Claude Desktop cookies",
+            format!(
+                "the `{}` cookie is not encrypted the way Pitboard knows",
+                facts.cookies_odd_value.as_deref().unwrap_or_default()
             ),
             "Pitboard will not switch Claude Desktop accounts until it understands this \
              format. Nothing has been moved.",
@@ -3678,6 +3695,7 @@ mod tests {
             data_dir_missing: false,
             same_volume: Some(true),
             cookies_meta_version: Some(24),
+            cookies_odd_value: None,
             cookies_error: None,
             config_error: None,
             twins_differ: false,
@@ -3989,6 +4007,32 @@ mod tests {
             level_of(&checks, "desktop_config_unreadable"),
             Some(Level::Fail)
         );
+    }
+
+    /// A jar at the version Pitboard reads, holding a cookie that is not `v10` ciphertext, is
+    /// refused by every enrolment and switch, so doctor does not call its cookies healthy.
+    #[test]
+    fn a_cookie_in_another_encryption_is_a_format_failure_doctor_says() {
+        let m = desktop_doctor("odd-cookie-value");
+        m.mem.plant_cookies(
+            &m.support().join("Cookies"),
+            crate::provider::desktop::types::CookieTable {
+                meta_version: 24,
+                rows: vec![crate::provider::desktop::types::CookieRow {
+                    host_key: ".claude.ai".into(),
+                    name: "sessionKey".into(),
+                    encrypted_value: b"v11another".to_vec(),
+                    expires_utc: 0,
+                }],
+            },
+        );
+        let facts = gather(&m.ctx);
+        let checks = evaluate(&facts);
+        assert_eq!(
+            level_of(&checks, "desktop_format_unknown"),
+            Some(Level::Fail)
+        );
+        assert_eq!(level_of(&checks, "desktop_cookies"), None);
     }
 
     /// A switch treats a process list it cannot read as Claude still being open and moves

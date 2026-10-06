@@ -495,7 +495,8 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         if let Some(original) = &original {
             keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, original)?;
         }
-        take(ctx, which, steps, &mut strays)?;
+        crate::fault::point("tree.recovery_steps_decided");
+        take(ctx, which, &[&from_park, &root], steps, &mut strays)?;
         // The app may have rewritten its config once the items were gone, so the keys kept
         // before the first move go back with them, unless it is as it was.
         if let Some(original) = original {
@@ -564,7 +565,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     let config = paths::config_file(&root);
     if jar_installed
         && journal.operation == Operation::Switch
-        && another_login_made_the_jar_theirs(ctx, journal, &root, &config)?
+        && another_login_made_the_jar_theirs(ctx, journal, &root, &config, &parks)?
     {
         return Err(undetermined(
             "another account signed in while recovery was stopped".into(),
@@ -582,7 +583,10 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     if let Some(incoming) = &incoming {
         keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, incoming)?;
     }
-    take(ctx, which, steps, &mut strays)?;
+    crate::fault::point("tree.recovery_steps_decided");
+    let mut bases: Vec<&Path> = vec![&root];
+    bases.extend(to_park.as_deref());
+    take(ctx, which, &bases, steps, &mut strays)?;
     crate::fault::point("tree.recovery_moved");
 
     // The app rewrites its config as it runs, so it is asked once more, as before every move.
@@ -673,11 +677,16 @@ fn refuse_linked_park(park: &Path) -> std::result::Result<(), String> {
 /// is neither side of the switch, is another login's: putting the incoming account's keys
 /// over it would file one account's keys under another's session. The record is kept, and
 /// `abandon` stays available.
+///
+/// A config that names the outgoing account is what a crash between the install and the
+/// splice leaves, but also what the outgoing account signing in again writes. The park kept
+/// the outgoing keys, so only a config that still holds exactly those is the crash's.
 fn another_login_made_the_jar_theirs(
     ctx: &Context,
     journal: &TreeJournal,
     root: &Path,
     config: &Path,
+    parks: &Path,
 ) -> Result<bool> {
     let Some(session) = identity::session_of(ctx, root)? else {
         return Ok(false);
@@ -691,9 +700,24 @@ fn another_login_made_the_jar_theirs(
         .get(paths::LAST_KNOWN_ACCOUNT_KEY)
         .and_then(serde_json::Value::as_str)
         .filter(|uuid| !uuid.is_empty());
-    Ok(named.is_some_and(|uuid| {
-        Some(uuid) != journal.to_uuid.as_deref() && Some(uuid) != journal.from_uuid.as_deref()
-    }))
+    let Some(uuid) = named else {
+        return Ok(false);
+    };
+    if Some(uuid) == journal.to_uuid.as_deref() {
+        return Ok(false);
+    }
+    if Some(uuid) != journal.from_uuid.as_deref() {
+        return Ok(true);
+    }
+    // The outgoing account's own name: its keys are told apart from a login it made since.
+    let Some(park) = journal.from_park.as_deref() else {
+        return Ok(false);
+    };
+    let kept = parks.join(park).join(CONFIG_KEYS_FILE);
+    Ok(match kept_keys(&kept, &journal.config_keys.from) {
+        Ok(original) => original != keys,
+        Err(_) => false,
+    })
 }
 
 /// The keys of the config a recovery is about to write over, set aside with the strays
@@ -742,19 +766,35 @@ fn verified(ctx: &Context, journal: &TreeJournal, root: &Path) -> Result<bool> {
 
 /// Take the steps, each one after asking again whether the app has opened. What is set
 /// aside goes into the recovery's one directory of strays.
+///
+/// The steps were decided from what each folder held, and a folder on the way to an item can
+/// become a link before the step is taken. Every path is looked at again under the folder it
+/// was decided under (`bases`), so nothing is moved to or from where a link points.
 fn take(
     ctx: &Context,
     which: ProviderId,
+    bases: &[&Path],
     steps: Vec<Step>,
     strays: &mut moves::Strays,
 ) -> Result<()> {
+    let recheck = |path: &Path| -> Result<()> {
+        for base in bases {
+            if let Ok(relative) = path.strip_prefix(base) {
+                tree::inode_of_live(base, &relative.to_string_lossy())?;
+            }
+        }
+        Ok(())
+    };
     for step in steps {
         tree::still_quiet(ctx, which)?;
         match step {
             Step::Stray(path) => {
+                recheck(&path)?;
                 strays.set_aside(ctx, &path)?;
             }
             Step::Move(from, to) => {
+                recheck(&from)?;
+                recheck(&to)?;
                 tree::move_item(&from, &to)?;
             }
         }
@@ -816,6 +856,7 @@ pub(super) fn abandon(ctx: &Context, state: &mut State) -> Result<Option<Abandon
 mod tests {
     use super::super::harness::{APP_PATH, NOW, TREE_POINTS, Whole, desktop_machine, jar};
     use super::*;
+    use crate::fault;
     use std::collections::BTreeSet;
 
     /// What must be true after a killed Claude Desktop switch has been recovered, wherever
@@ -1044,6 +1085,78 @@ mod tests {
             "the other account's keys are left as they are"
         );
         assert!(pending(&m.ctx).is_some(), "the record is kept");
+    }
+
+    /// The account a switch left may sign in again by writing the installed jar in place. Its
+    /// config then names the outgoing account too, so the name alone cannot tell it from the
+    /// config the crash left: the keys it holds can, since the park kept the outgoing ones.
+    #[test]
+    fn the_outgoing_account_signing_back_in_is_not_given_the_incoming_keys() {
+        let m = desktop_machine("rewritten-jar-by-outgoing");
+        assert_eq!(m.crash_at("tree.installed").unwrap_err(), "tree.installed");
+        let cookies = m.support().join("Cookies");
+        std::fs::write(&cookies, b"made by Claude").unwrap();
+        m.mem
+            .plant_cookies(&cookies, jar("v10here-again", NOW + 86_400));
+        let config = m.support().join("config.json");
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        written["lastKnownAccountUuid"] = serde_json::json!("here");
+        written["oauth:tokenCache"] = serde_json::json!("cache-here-again");
+        std::fs::write(&config, written.to_string()).unwrap();
+        let before = std::fs::read(&config).unwrap();
+
+        let refused = m
+            .recover()
+            .expect_err("the outgoing account signed in again");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&config).unwrap(),
+            before,
+            "the new login's keys are left as they are"
+        );
+        assert!(pending(&m.ctx).is_some(), "the record is kept");
+    }
+
+    /// Recovery decides its steps before it takes any, and a folder on the way to an item can
+    /// become a link in between. Every move looks at the way again, so nothing is taken to or
+    /// from where the link points.
+    #[test]
+    fn a_folder_that_became_a_link_while_recovery_ran_is_not_moved_through() {
+        let m = desktop_machine("recovery-linked");
+        let indexed = paths::parks_dir(&m.ctx)
+            .join(m.there_park())
+            .join("IndexedDB/https_claude.ai_0.indexeddb.leveldb");
+        std::fs::create_dir_all(&indexed).unwrap();
+        std::fs::write(indexed.join("000003.log"), "the park's").unwrap();
+        assert_eq!(
+            m.crash_at("tree.park_recorded").unwrap_err(),
+            "tree.park_recorded"
+        );
+        let outside = m.support().with_file_name("outside-recovery");
+        std::fs::create_dir_all(&outside).unwrap();
+        let live_indexed = m.support().join("IndexedDB");
+        let linked = outside.clone();
+        let refused = fault::meanwhile(
+            "tree.recovery_steps_decided",
+            move || {
+                let _ = std::fs::remove_dir_all(&live_indexed);
+                std::os::unix::fs::symlink(&linked, &live_indexed).unwrap();
+            },
+            || m.recover(),
+        )
+        .expect_err("a linked folder on the way");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was moved to where the link points"
+        );
     }
 
     /// A folder deleted and made again at the same path, or a link pointed somewhere else, is

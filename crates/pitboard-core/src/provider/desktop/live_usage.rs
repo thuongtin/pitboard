@@ -274,6 +274,12 @@ pub(crate) fn disable(ctx: &Context) -> Result<LiveUsage, Error> {
 /// wait on anybody. Never read unless live usage is on, allowed, and the item is still the
 /// one that was allowed.
 pub(crate) fn key(ctx: &Context) -> Result<Zeroizing<[u8; 16]>, Stale> {
+    keyed(ctx).map(|(_, key)| key)
+}
+
+/// [`key`], with the stamp of the item it was read for, so a reading that finds the key does
+/// not open the jar can tell whether the key it used is still the one allowed.
+fn keyed(ctx: &Context) -> Result<Kept, Stale> {
     // Held to the end, so rows asking at once wait for one read and use what it kept.
     let held = gate();
     let state = load(ctx);
@@ -304,13 +310,13 @@ pub(crate) fn key(ctx: &Context) -> Result<Zeroizing<[u8; 16]>, Stale> {
     if let Some((kept, key)) = cached(ctx)
         && kept == stamp
     {
-        return Ok(key);
+        return Ok((stamp, key));
     }
     match ctx.safe_storage().password(ctx, KeyRead::Refresh) {
         Ok(password) => {
             let key = crypto::derive_key(&password);
-            keep(ctx, stamp, key.clone());
-            Ok(key)
+            keep(ctx, stamp.clone(), key.clone());
+            Ok((stamp, key))
         }
         // Says only that this session cannot show the question, not that it was refused.
         Err(KeyReadError::NoGui) => Err(Stale::LiveUsageNeedsGui),
@@ -366,13 +372,21 @@ pub(crate) fn ask(
     account: &Account,
     expected_session: Option<&str>,
 ) -> Result<Snapshot, Stale> {
-    let key = key(ctx)?;
+    let (stamp, key) = keyed(ctx)?;
+    crate::fault::point("live_usage.key_read");
     let is_live = support_dir(ctx).is_some_and(|live| live == root);
     let wrong_key = || {
-        if is_live {
-            needs_approval(ctx, &gate(), "key_does_not_decrypt")
+        if !is_live {
+            return Stale::ParkUnreadable;
+        }
+        let held = gate();
+        // The key that failed is the one read for `stamp`. A saved state granting another
+        // item version was allowed after this read began, so what failed is not what was
+        // allowed, and withdrawing that approval would undo the one just given.
+        if load(ctx).stamp.as_ref() == Some(&stamp) {
+            needs_approval(ctx, &held, "key_does_not_decrypt")
         } else {
-            Stale::ParkUnreadable
+            Stale::Interrupted
         }
     };
     let table = ctx
@@ -981,6 +995,35 @@ mod tests {
         assert_eq!(state.approval, Approval::NeedsApproval);
         assert_eq!(state.reason.as_deref(), Some("item_changed"));
         assert_eq!(state.last_ok_at, None, "no success is noted over it");
+    }
+
+    /// A refresh that already holds the old key while Claude makes its key again and somebody
+    /// allows the new one must not withdraw the approval just given: the failure belongs to
+    /// the key it used, and the saved state grants another.
+    #[test]
+    fn a_stale_key_does_not_withdraw_a_newer_approval() {
+        let d = desk("stale-key", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        let other = d.ctx.clone();
+        let keychain = Arc::clone(&d.keychain);
+        let mem = Arc::clone(&d.mem);
+        let db = cookies_db(&d.live());
+        let refused = crate::fault::meanwhile(
+            "live_usage.key_read",
+            move || {
+                // Claude made its key again, rewrote the jar with it, and it was allowed.
+                keychain
+                    .now_holding("the new key")
+                    .changed_at("20261001120000Z");
+                mem.plant_cookies(&db, jar("the new key", Some(ORG)));
+                enable(&other).expect("allowed again");
+            },
+            || ask(&d.ctx, &d.live(), &account(None), None),
+        );
+        assert!(refused.is_err(), "the old key opens nothing now");
+        let state = load(&d.ctx);
+        assert_eq!(state.approval, Approval::Granted, "{state:?}");
+        assert!(state.enabled);
     }
 
     /// A key that opens nothing is not kept, and is not taken as allowed.
