@@ -300,8 +300,11 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
     let _held = gate();
     let _locked = state_lock(ctx)?;
     let mut state = load(ctx);
-    // Somebody turned it off while macOS was being asked: that request is the later one.
-    if began.enabled && !state.enabled {
+    // Somebody turned it off while macOS was being asked: that request is the later one. A
+    // state that is off and is not the one this began from was written meanwhile, whether or
+    // not the flag itself moved: a request that began from off finds it off again after a
+    // second one turned it on and somebody off.
+    if !state.enabled && !same_state(&began, &state) {
         return Err(refused("turned_off_meanwhile"));
     }
     state.enabled = true;
@@ -1237,6 +1240,33 @@ mod tests {
         );
         assert!(!load(&d.ctx).enabled, "the later turn-off stands");
         assert!(cached(&d.ctx).is_none(), "no key is kept for it");
+    }
+
+    /// Two requests to turn live usage on overlap, and it is turned off after the second:
+    /// the turn-off is the later request, though the first began from a state that was off.
+    #[test]
+    fn an_enable_does_not_undo_a_disable_after_another_enable_overlapped() {
+        let d = desk(
+            "overlapping-enables",
+            ScriptedSafeStorage::holding(PASSWORD),
+        );
+        let other = d.ctx.clone();
+        let refused = crate::fault::meanwhile(
+            "live_usage.enable_read",
+            move || {
+                enable(&other).expect("the second request turned it on");
+                disable(&other).expect("and somebody turned it off");
+            },
+            || enable(&d.ctx),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(Error::LiveUsageNotAllowed { ref reason, .. }) if reason == "turned_off_meanwhile"
+            ),
+            "{refused:?}"
+        );
+        assert!(!load(&d.ctx).enabled, "the later turn-off stands");
     }
 
     /// A reading's success is noted by writing only its time, so a state another process

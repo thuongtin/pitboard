@@ -283,7 +283,19 @@ impl State {
             .accounts
             .iter()
             .any(|a| a.label == key.label && a.provider() != key.provider);
-        if shared { key.qualified() } else { key.typed() }
+        // A label from before there were tools may hold a slash, and a bare one whose first
+        // part names a tool with an account of the rest would select that account instead.
+        let captured = key.provider == crate::label::DEFAULT
+            && matches!(
+                crate::label::parse(&key.label),
+                Ok(crate::label::Spec::Qualified(provider, rest))
+                    if self.get(&Key::new(provider, rest)).is_some()
+            );
+        if shared || captured {
+            key.qualified()
+        } else {
+            key.typed()
+        }
     }
 
     /// Every label this tool has enrolled, for a message that would otherwise send someone
@@ -1243,6 +1255,22 @@ mod tests {
         assert_eq!(s.typed(&claude("work")), "claude/work");
         assert_eq!(s.typed(&Key::new(ProviderId::Codex, "work")), "codex/work");
         assert_eq!(s.typed(&claude("personal")), "personal");
+    }
+
+    /// A label written before there were tools may hold a slash. Where its first part now
+    /// names a tool that has an account of the rest, the bare name would select that account
+    /// instead, so the name suggested for the old one is qualified.
+    #[test]
+    fn a_legacy_label_a_tool_prefix_would_capture_is_qualified() {
+        let mut s = State::default();
+        s.upsert(account("desktop/work", None));
+        assert_eq!(s.typed(&claude("desktop/work")), "desktop/work");
+        s.upsert(desktop_account("work", "desktop-uuid"));
+        let legacy = claude("desktop/work");
+        assert_eq!(s.typed(&legacy), "claude/desktop/work");
+        let typed = s.typed(&legacy);
+        let found = crate::label::resolve(&s, &typed).expect("the name resolves");
+        assert_eq!(found.key(), legacy);
     }
 
     fn desktop_account(label: &str, uuid: &str) -> Account {
