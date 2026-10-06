@@ -443,8 +443,11 @@ fn desktop_report(
     // The bundle's own manifest, rather than asking it for its version: a status runs on
     // every refresh of a menu bar, and the version is doctor's question.
     let installed = ctx.desktop_installed();
-    (enrolled || installed).then(|| DesktopReport {
-        live_usage: live_usage::load(ctx),
+    // Live usage stays on, holding Claude's key, after the app is removed and its last account
+    // forgotten: it is still said, so whoever turned it on can find and turn it off.
+    let live_usage = live_usage::load(ctx);
+    (enrolled || installed || live_usage.enabled).then(|| DesktopReport {
+        live_usage,
         awaiting_sign_in: crate::switch::awaiting_sign_in(ctx),
         recovery_waiting: recovery.map(|(from, to)| InterruptedSwitch { from, to }),
     })
@@ -2979,6 +2982,28 @@ mod tests {
             .with_desktop_app(home.0.join("Claude.app").to_string_lossy().into());
         let report = gather_offline(&ctx, &state(&["alpha"]));
         assert!(report.desktop.is_none());
+    }
+
+    /// Live usage stays on, holding Claude's key, after the app is removed and its last
+    /// account forgotten: a status still says so, as the app's Settings does.
+    #[test]
+    fn live_usage_left_on_is_reported_with_no_app_and_no_account() {
+        let home = scratch("no-desktop-live");
+        let (ctx, _mem, _api) = machine(&home.0, Some("alpha-uuid"));
+        let ctx = ctx
+            .with_desktop_dir(home.0.join("claude-desktop").to_string_lossy().into())
+            .with_desktop_app(home.0.join("Claude.app").to_string_lossy().into());
+        live_usage::save(
+            &ctx,
+            &live_usage::LiveUsage {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let report = gather_offline(&ctx, &state(&["alpha"]));
+        let desktop = report.desktop.as_ref().expect("live usage is on");
+        assert!(desktop.live_usage.enabled);
     }
 
     /// A home of this test's own, removed when the test is done with it.

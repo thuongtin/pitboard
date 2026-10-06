@@ -248,9 +248,13 @@ pub(crate) fn delete_park(ctx: &Context, name: &str) -> Result<(), Error> {
     };
     // From the top down, so a link above the parks dir is refused before anything is read
     // through it.
+    let mut checked = Vec::new();
     for dir in [desktop_home(ctx), parks.clone()] {
         match std::fs::symlink_metadata(&dir) {
-            Ok(found) => refuse_unless_private(&dir, &found)?,
+            Ok(found) => {
+                refuse_unless_private(&dir, &found)?;
+                checked.push((found.dev(), found.ino()));
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(unwritable(&dir)(e)),
         }
@@ -260,7 +264,7 @@ pub(crate) fn delete_park(ctx: &Context, name: &str) -> Result<(), Error> {
         Ok(found) if found.file_type().is_symlink() || !found.is_dir() => {
             return Err(refuse(&park, "a park is a directory, and this is not one"));
         }
-        Ok(_) => {}
+        Ok(found) => checked.push((found.dev(), found.ino())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(unwritable(&park)(e)),
     }
@@ -270,15 +274,20 @@ pub(crate) fn delete_park(ctx: &Context, name: &str) -> Result<(), Error> {
         return Err(refuse(&park, "it is not inside the parks directory"));
     }
     crate::fault::point("tree.park_delete_checked");
-    // The folders once more, as close to the delete as a path allows: a link put in the
-    // place of the parks directory since the checks would have it follow to a folder of the
-    // same name.
-    for dir in [desktop_home(ctx), parks.clone()] {
+    // The folders once more, as close to the delete as a path allows: a link, or a folder
+    // made again under the same name, put in the place of one checked would have the delete
+    // take whatever stands there now.
+    let mut again = Vec::new();
+    for dir in [desktop_home(ctx), parks.clone(), park.clone()] {
         let found = std::fs::symlink_metadata(&dir).map_err(unwritable(&dir))?;
-        refuse_unless_private(&dir, &found)?;
+        if dir != park {
+            refuse_unless_private(&dir, &found)?;
+        } else if found.file_type().is_symlink() || !found.is_dir() {
+            return Err(refuse(&park, "a park is a directory, and this is not one"));
+        }
+        again.push((found.dev(), found.ino()));
     }
-    let again = park.canonicalize().map_err(unwritable(&park))?;
-    if again != canonical {
+    if again != checked || park.canonicalize().map_err(unwritable(&park))? != canonical {
         return Err(refuse(&park, "it moved while it was being checked"));
     }
     std::fs::remove_dir_all(&park).map_err(unwritable(&park))?;
@@ -637,6 +646,36 @@ mod tests {
         assert!(
             outside.join("pitboard-tree-a-1").join("keep").exists(),
             "nothing was deleted where the link points"
+        );
+    }
+
+    /// Folders of the same names, made again after the checks, are not the ones checked.
+    #[test]
+    fn delete_park_deletes_only_the_folders_it_checked() {
+        let s = scratch("delete-replaced");
+        let (ctx, _mem) = machine(&s.0);
+        let parks = parks_dir(&ctx);
+        ensure_private_dir(&parks).unwrap();
+        std::fs::create_dir_all(parks.join("pitboard-tree-a-1")).unwrap();
+        let displaced = s.0.join("parks-displaced");
+        let refused = crate::fault::meanwhile(
+            "tree.park_delete_checked",
+            {
+                let (parks, displaced) = (parks.clone(), displaced.clone());
+                move || {
+                    std::fs::rename(&parks, &displaced).unwrap();
+                    ensure_private_dir(&parks).unwrap();
+                    let other = parks.join("pitboard-tree-a-1");
+                    ensure_private_dir(&other).unwrap();
+                    std::fs::write(other.join("keep"), b"keep").unwrap();
+                }
+            },
+            || delete_park(&ctx, "pitboard-tree-a-1"),
+        );
+        assert!(refused.is_err(), "the folders are not the ones checked");
+        assert!(
+            parks.join("pitboard-tree-a-1").join("keep").exists(),
+            "what stands there now was not deleted"
         );
     }
 

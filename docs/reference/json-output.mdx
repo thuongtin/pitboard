@@ -116,7 +116,7 @@ The `data` of each command, in the order of `pitboard --help`:
 
 ## Status data
 
-The `data` of `pitboard status` has four fields, and a fifth, `desktop`, on a Mac with Claude Desktop installed or a Claude Desktop account enrolled:
+The `data` of `pitboard status` has four fields, and sometimes a fifth, `desktop`. The fifth is there on a Mac with Claude Desktop installed or an account enrolled, and while live usage is on:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -124,7 +124,7 @@ The `data` of `pitboard status` has four fields, and a fifth, `desktop`, on a Ma
 | `signed_in` | object or null | The Claude Code account in use, never a Codex one: `account_uuid`, `email` and `organization_uuid`. |
 | `signed_in_error` | string or null | Why `signed_in` is `null`, such as `nothing is signed in`. |
 | `accounts` | array | One object per enrolled account: Claude Code first, and the account in use first within each tool. A login in use that no account matches gets one too. |
-| `desktop` | object | Claude Desktop's state: `live_usage`, `awaiting_sign_in` and `recovery_waiting`. Left out on other machines. |
+| `desktop` | object | Claude Desktop's state: `live_usage`, `awaiting_sign_in` and `recovery_waiting`. Left out where there is no app or account and live usage is off. |
 
 For Claude Desktop, `desktop.live_usage` has these fields. The `desktop` command prints the same object.
 
