@@ -681,6 +681,10 @@ fn park_out(
     )?;
     fault::point("tree.park_stored");
 
+    // The park, once more: a link put in its place now would make the checks below read the
+    // folder it points at, and the account would be recorded under a link.
+    dir_anchor.still_there()?;
+
     // The park is the session that was signed in, item for item, before it is recorded as
     // the account's.
     let parked_session = identity::session_of(ctx, &dir)?;
@@ -2139,6 +2143,40 @@ mod tests {
                 .iter()
                 .any(|w| matches!(w, Warning::StraysKept { .. })),
             "{warnings:?}"
+        );
+    }
+
+    /// The park can be replaced by a link to itself between being written and being verified:
+    /// the checks would pass through the link, and the account be recorded under it.
+    #[test]
+    fn a_park_that_became_a_link_after_it_was_stored_is_not_recorded() {
+        let m = desktop_machine("park-linked-after-stored");
+        let parks = paths::parks_dir(&m.ctx);
+        let there = m.there_park();
+        let displaced = m.support().with_file_name("displaced-park");
+        let refused = fault::meanwhile(
+            "tree.park_stored",
+            move || {
+                for entry in std::fs::read_dir(&parks).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy() != there {
+                        std::fs::rename(entry.path(), &displaced).unwrap();
+                        std::os::unix::fs::symlink(&displaced, entry.path()).unwrap();
+                    }
+                }
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        let state = state::load(&m.ctx).unwrap();
+        assert!(
+            state
+                .get(&Key::new(ProviderId::Desktop, "here"))
+                .is_some_and(|account| account.parked.is_none()),
+            "a link was recorded as the account's park"
         );
     }
 

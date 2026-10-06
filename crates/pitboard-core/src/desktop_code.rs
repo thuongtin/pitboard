@@ -38,6 +38,15 @@ pub enum DesktopCodeError {
 }
 
 impl DesktopCodeError {
+    /// The exit status: a refusal the account's own error carries keeps its status, and
+    /// every other failure of a session is an ordinary one.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Account(error) => error.exit_code(),
+            _ => 1,
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             Self::Account(error) => error.code(),
@@ -417,6 +426,19 @@ mod tests {
         let session = prepare(&ctx, "there").expect("the live grant is the fresh one");
 
         assert_eq!(session.expires_at(), NOW + 3600);
+    }
+
+    /// A refusal the account's own error carries is the command's refusal: exit 3, which a
+    /// script tells from an ordinary failure.
+    #[test]
+    fn a_wrapped_account_refusal_keeps_its_exit_status() {
+        let refusal = Error::DesktopFormatUnknown {
+            what: "cookies".into(),
+            found: "format 99".into(),
+        };
+        assert_eq!(refusal.exit_code(), 3);
+        assert_eq!(DesktopCodeError::Account(refusal).exit_code(), 3);
+        assert_eq!(DesktopCodeError::Switching.exit_code(), 1);
     }
 
     #[test]

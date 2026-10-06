@@ -1280,7 +1280,7 @@ fn main() -> ExitCode {
             }) {
                 Ok(status) => return ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
                 Err(error) => Report {
-                    exit: 1,
+                    exit: error.exit_code(),
                     failure_unsaid: true,
                     failure: Some((error.code(), error.to_string())),
                     ..Report::done("desktop_code", json!({}), String::new())

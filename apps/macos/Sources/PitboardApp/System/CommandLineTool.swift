@@ -48,7 +48,11 @@ struct CommandLineTool: Sendable {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         execute: @escaping Runner = CommandLineTool.execute(script:)
     ) {
-        let home = home ?? homeDirectory(environment: environment)
+        // An empty `HOME` is a path too, to the core: this process's own directory. A relative
+        // one is read from there as well, and Terminal starts the helper somewhere else.
+        let given = home ?? homeDirectory(environment: environment)
+        let home = Self.fromWorkingDirectory(
+            given.isEmpty ? FileManager.default.currentDirectoryPath : given)
         var codeEnvironment = [
             "HOME": home,
             "PITBOARD_HOME": environment["PITBOARD_HOME"].map {
