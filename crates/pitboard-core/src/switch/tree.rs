@@ -565,12 +565,14 @@ pub(super) fn enroll_current(
 fn park_out(
     ctx: &Context,
     which: ProviderId,
-    root: &Path,
+    root: &Anchored,
     state: &mut State,
     from_key: &Key,
     outgoing: &TreeIdentity,
     journal: &TreeJournal,
 ) -> Result<Park> {
+    let anchored_root = root;
+    let root = root.path.as_path();
     let name = journal
         .from_park
         .clone()
@@ -592,7 +594,8 @@ fn park_out(
     let keys = config::read_keys(&paths::config_file(root))?;
     write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys.0)?;
 
-    let anchors = [Anchored::at(root), Anchored::at(&dir)];
+    let dir_anchor = Anchored::at(&dir);
+    let anchors = [anchored_root, &dir_anchor];
     let mut moved = Vec::new();
     for item in journal.items.iter().filter(|i| i.from_inode.is_some()) {
         // Asked again before every move: the app may have been opened since the last.
@@ -603,7 +606,7 @@ fn park_out(
         fault::point("tree.park_move_checked");
         // The folders themselves are looked at again: a link put in the place of either is
         // not on the way to an item, and a rename follows it.
-        anchors.iter().try_for_each(Anchored::still_there)?;
+        anchors.iter().try_for_each(|anchor| anchor.still_there())?;
         move_item(&root.join(&item.path), &dir.join(&item.path))?;
         moved.push(item.path.clone());
         if moved.len() == 1 {
@@ -769,6 +772,10 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
         return Err(Error::ParkedLoginExpired { label: to });
     }
     let incoming = check_park(ctx, &to, &target, &held)?;
+    // Pinned where the park was checked and the folder was read, before the record and the
+    // outgoing account's move: a link put in the place of either since is not where they were.
+    let root_anchor = Anchored::at(&root);
+    let incoming_anchor = Anchored::at(&incoming);
     let incoming_keys = config::read_keys(&incoming.join(CONFIG_KEYS_FILE))?;
     let from = from_key.as_ref().map(|k| state.typed(k));
     let from_uuid = from_key
@@ -816,7 +823,13 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     // finished rather than undone.
     let parked = match (&from_key, &live) {
         (Some(from_key), Some(outgoing)) => Some(park_out(
-            ctx, which, &root, &mut state, from_key, outgoing, &journal,
+            ctx,
+            which,
+            &root_anchor,
+            &mut state,
+            from_key,
+            outgoing,
+            &journal,
         )?),
         _ => None,
     };
@@ -827,7 +840,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     // Everything this switch sets aside shares one directory under the strays directory.
     let mut set_aside = moves::Strays::new();
     let mut installed = 0;
-    let anchors = [Anchored::at(&root), Anchored::at(&incoming)];
+    let anchors = [root_anchor, incoming_anchor];
     for item in &journal.items {
         still_quiet(ctx, which)?;
         let there = root.join(&item.path);
@@ -857,6 +870,8 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     // hold keys the app wrote since, which no park holds, so they are set aside with the
     // strays rather than written over.
     still_quiet(ctx, which)?;
+    // The config is read and written under the folder, which is looked at once more.
+    anchors.iter().try_for_each(Anchored::still_there)?;
     // With an outgoing account the park holds its keys, so what is left is only new when it
     // is not those either: a login the app made between the park and the install.
     {
@@ -868,6 +883,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
             strays += 1;
         }
     }
+    anchors.iter().try_for_each(Anchored::still_there)?;
     config::splice(&paths::config_file(&root), &incoming_keys)?;
     fault::point("tree.config_spliced");
 
@@ -974,6 +990,7 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
     };
     let outgoing = live.expect("an enrolled owner is somebody signed in");
     let from = state.typed(&from_key);
+    let root_anchor = Anchored::at(&root);
 
     let mut items = Vec::new();
     for item in tree.items() {
@@ -1001,9 +1018,16 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
     fault::point("tree.journal_written");
 
     let parked = park_out(
-        ctx, which, &root, &mut state, &from_key, &outgoing, &journal,
+        ctx,
+        which,
+        &root_anchor,
+        &mut state,
+        &from_key,
+        &outgoing,
+        &journal,
     )?;
     still_quiet(ctx, which)?;
+    root_anchor.still_there()?;
     config::splice(&paths::config_file(&root), &ConfigKeys::default())?;
     fault::point("tree.config_spliced");
     match tree.identify(ctx, &root) {
@@ -1266,6 +1290,59 @@ mod tests {
         assert!(
             matches!(refused, Error::DesktopDataInaccessible { .. }),
             "{refused:?}"
+        );
+    }
+
+    /// The park the switch checked can be replaced by a link while the record is written and
+    /// the outgoing account is parked, long before the first item is installed.
+    #[test]
+    fn an_incoming_park_that_became_a_link_before_the_record_is_not_moved_out_of() {
+        let m = desktop_machine("incoming-linked-early");
+        let aside = m.support().with_file_name("incoming-aside-early");
+        let incoming = paths::parks_dir(&m.ctx).join(m.there_park());
+        let (moved_to, path) = (aside.clone(), incoming.clone());
+        let refused = fault::meanwhile(
+            "tree.journal_written",
+            move || {
+                std::fs::rename(&path, &moved_to).unwrap();
+                std::os::unix::fs::symlink(&moved_to, &path).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the incoming park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+    }
+
+    /// The data folder can be replaced by a link after the last item is installed, and the
+    /// config of whatever the link points at is not Claude's.
+    #[test]
+    fn a_data_folder_that_became_a_link_before_the_config_is_not_written_through() {
+        let m = desktop_machine("root-linked-before-config");
+        let outside = m.support().with_file_name("outside-config");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("config.json"), "{\"locale\":\"elsewhere\"}").unwrap();
+        let (support, linked) = (m.support(), outside.clone());
+        let refused = fault::meanwhile(
+            "tree.installed",
+            move || {
+                let aside = support.with_file_name("Claude-displaced");
+                std::fs::rename(&support, &aside).unwrap();
+                std::os::unix::fs::symlink(&linked, &support).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the data folder became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("config.json")).unwrap(),
+            "{\"locale\":\"elsewhere\"}",
+            "the config where the link points is left alone"
         );
     }
 

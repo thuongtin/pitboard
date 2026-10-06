@@ -194,6 +194,6 @@ A warning does not stop the command. The Pitboard window shows it in the notice 
 | `replaced_outside_pitboard` | **Claude was signed in outside Pitboard** | Claude Desktop was signed in to another account outside Pitboard, and the account recorded in use had no parked login to keep, so it is no longer recorded in use. Enrol it again to switch back to it. |
 | An error code, such as `config_write_failed` or `renewal_failed` | **Pitboard has a warning** | That error happened without stopping the command. See the code's row earlier. |
 
-`twin_not_enrolled` appears only after `pitboard use --both`: the other Claude app has no account enrolled for the same claude.ai account, so Pitboard switched only the one you named. Enrol the account in the other app to switch both.
+`twin_not_enrolled` appears only after `pitboard use --both`. The other Claude app has no account enrolled for the same claude.ai account. Pitboard therefore switched only the one you named. Enrol the account in the other app to switch both.
 
 `label_unusable` appears only in `pitboard log`, where it records a label refused with `usage`.
