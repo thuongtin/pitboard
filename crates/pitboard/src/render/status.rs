@@ -297,15 +297,18 @@ pub fn human(report: &Report) -> String {
         .as_ref()
         .and_then(|d| d.awaiting_sign_in.as_ref())
     {
+        let parked = if waiting.from_label.is_empty() {
+            String::new()
+        } else {
+            format!(", and {} is parked", waiting.from_label)
+        };
         blocks.push(format!(
             "{}\n",
             paint(
                 WARN,
                 format!(
-                    "Claude Desktop is signed out, and {} is parked. Open Claude, sign in to \
-                     the other account, quit Claude, then run `pitboard enroll \
-                     desktop/<label>`.",
-                    waiting.from_label
+                    "Claude Desktop is signed out{parked}. Open Claude, sign in to the other \
+                     account, quit Claude, then run `pitboard enroll desktop/<label>`."
                 )
             )
         ));
@@ -399,7 +402,7 @@ pub fn json(report: &Report) -> Value {
         value["desktop"] = json!({
             "live_usage": live_usage_json(&desktop.live_usage),
             "awaiting_sign_in": desktop.awaiting_sign_in.as_ref().map(|a| json!({
-                "from": a.from_label,
+                "from": Some(&a.from_label).filter(|label| !label.is_empty()),
                 "started_at": a.started_at,
             })),
             "recovery_waiting": desktop.recovery_waiting.as_ref().map(|w| json!({
@@ -594,6 +597,22 @@ mod tests {
         let text = plain(&human(&report));
         assert!(text.contains("Claude Desktop is signed out"), "{text}");
         assert!(text.contains("pitboard enroll desktop/<label>"), "{text}");
+    }
+
+    /// Where Claude was already signed out nobody was parked, and the text and the JSON say
+    /// no account rather than an empty name.
+    #[test]
+    fn a_sign_in_waiting_with_nobody_parked_names_nobody() {
+        let mut report = desktop_report(vec![desktop("personal", false)]);
+        report.desktop.as_mut().unwrap().awaiting_sign_in = Some(pitboard_core::status::Awaiting {
+            from_label: String::new(),
+            started_at: NOW - 60,
+        });
+        let text = plain(&human(&report));
+        assert!(text.contains("Claude Desktop is signed out."), "{text}");
+        assert!(!text.contains("is parked"), "{text}");
+        assert!(text.contains("pitboard enroll desktop/<label>"), "{text}");
+        assert!(json(&report)["desktop"]["awaiting_sign_in"]["from"].is_null());
     }
 
     /// An interrupted switch waiting for the app to quit is an object naming both sides,

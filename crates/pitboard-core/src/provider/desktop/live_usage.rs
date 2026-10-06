@@ -398,6 +398,7 @@ pub(crate) fn ask(ctx: &Context, root: &Path, account: &Account) -> Result<Snaps
     match ctx.web().usage(ctx, &org, &session) {
         Ok(mut snapshot) => {
             snapshot.account_uuid = Some(account.account_uuid.clone());
+            crate::switch::note_organization(ctx, &account.account_uuid, &org);
             // Only the time is written, and only while still allowed: a row that found
             // approval withdrawn while this one was out is not undone, nor noted as fine.
             let _held = gate();
@@ -815,6 +816,32 @@ mod tests {
         }
         assert_eq!(d.keychain.password_reads(), 2);
         assert_eq!(d.keychain.approval_reads(), 1);
+    }
+
+    /// The organization a reading was asked with is kept on the account, so a jar that
+    /// later names none still has one to ask with.
+    #[test]
+    fn the_organization_a_reading_used_is_kept_on_the_account() {
+        let d = desk("org-kept", ScriptedSafeStorage::holding(PASSWORD));
+        enable(&d.ctx).expect("turned on");
+        let mut state = crate::state::State::default();
+        state.accounts.push(account(None));
+        crate::state::save(&d.ctx, &state).unwrap();
+
+        ask(&d.ctx, &d.live(), &account(None)).expect("asked");
+        let kept = |ctx: &Context| match &crate::state::load(ctx).unwrap().accounts[0].detail {
+            Detail::Desktop {
+                organization_uuid, ..
+            } => organization_uuid.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(kept(&d.ctx).as_deref(), Some(ORG));
+
+        // The jar has lost it, and the one kept is asked with.
+        d.mem
+            .plant_cookies(&cookies_db(&d.live()), jar(PASSWORD, None));
+        let known = crate::state::load(&d.ctx).unwrap().accounts[0].clone();
+        ask(&d.ctx, &d.live(), &known).expect("asked with the kept organization");
     }
 
     /// A refresh reads the live folder and every park at once, each on its own thread. The

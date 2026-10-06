@@ -49,7 +49,8 @@ pub(super) struct Manifest {
 /// and enrol it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Awaiting {
-    /// The account that was parked, as its label.
+    /// The account that was parked, as its label; empty where Claude was already signed out
+    /// and nobody was parked.
     pub from_label: String,
     pub started_at: i64,
 }
@@ -217,6 +218,37 @@ pub(super) fn note_session(state: &mut State, key: &Key, found: &TreeIdentity) {
         session_expires_at: found.expires_at,
     };
     state.upsert(account);
+}
+
+/// Keep `organization` as the one a claude.ai reading of the Desktop account `uuid` was
+/// asked with, so a jar that later names none still has one to ask with. Written only while
+/// no other Pitboard run holds the lock and no switch waits to be finished, like a renewal:
+/// it is a note, and never worth holding up or racing a change of the accounts.
+pub(crate) fn note_organization(ctx: &Context, uuid: &str, organization: &str) {
+    let Some(_exclusive) = super::try_exclusive(ctx) else {
+        return;
+    };
+    if tree_journal::pending(ctx).is_some() {
+        return;
+    }
+    let Ok(mut state) = state::load(ctx) else {
+        return;
+    };
+    let Some(mut account) = state.by_uuid(ProviderId::Desktop, uuid).cloned() else {
+        return;
+    };
+    let Detail::Desktop {
+        organization_uuid, ..
+    } = &mut account.detail
+    else {
+        return;
+    };
+    if organization_uuid.as_deref() == Some(organization) {
+        return;
+    }
+    *organization_uuid = Some(organization.to_string());
+    state.upsert(account);
+    let _ = state::save(ctx, &state);
 }
 
 /// A name for a new park of the account `uuid`, free in the parks directory.
@@ -478,6 +510,10 @@ fn park_out(
         });
     }
 
+    // Recording the park is the point after which a run is finished rather than undone, so
+    // the app is asked about once more first: opened since the last move, it may have
+    // written to a folder whose items are gone, and that run must be undone.
+    still_quiet(ctx, which)?;
     note_session(state, from_key, outgoing);
     let park = Park {
         service: name,
@@ -764,6 +800,18 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
     let live = tree.identify(ctx, &root)?;
     let from_key = match identity::whose(&state, live.clone())? {
         LiveOwner::Nobody => {
+            // Nobody to put back, but somebody is about to sign in and be enrolled, and a
+            // restart of the app in between must find that waiting. A wait that already
+            // names a parked account keeps it.
+            if awaiting_sign_in(ctx).is_none() {
+                write_awaiting(
+                    ctx,
+                    &Awaiting {
+                        from_label: String::new(),
+                        started_at: ctx.now(),
+                    },
+                )?;
+            }
             return Ok((Outcome::AlreadySignedOut { provider: which }, Vec::new()));
         }
         LiveOwner::NotEnrolled(_) => {
@@ -1621,5 +1669,89 @@ mod tests {
             "a tree park's name is deleted from the parks directory, never the vault"
         );
         assert!(!paths::parks_dir(&m.ctx).join(m.there_park()).exists());
+    }
+
+    /// An add begun while Claude is already signed out still waits for a sign-in, with
+    /// nobody to put back, so a restart of the app can find it and carry on.
+    #[test]
+    fn signing_out_while_signed_out_still_waits_for_a_sign_in() {
+        let m = desktop_machine("sign-out-twice");
+        signing_out(&m).expect("signed out");
+        clear_awaiting(&m.ctx);
+        assert_eq!(awaiting_sign_in(&m.ctx), None);
+
+        let (again, _) = signing_out(&m).expect("nothing to move");
+        assert!(
+            matches!(again, Outcome::AlreadySignedOut { .. }),
+            "{again:?}"
+        );
+        let waiting = awaiting_sign_in(&m.ctx).expect("waiting for a sign-in");
+        assert_eq!(waiting.from_label, "", "nobody was parked by this run");
+
+        // One that already names a parked account is not replaced by the empty one.
+        write_awaiting(
+            &m.ctx,
+            &Awaiting {
+                from_label: "here".into(),
+                started_at: NOW,
+            },
+        )
+        .unwrap();
+        signing_out(&m).expect("nothing to move");
+        assert_eq!(
+            awaiting_sign_in(&m.ctx).map(|a| a.from_label),
+            Some("here".to_string())
+        );
+    }
+
+    /// Log out in Claude leaves `lastKnownAccountUuid` in the config but removes the
+    /// session. Nobody is signed in then, so the account it names can be forgotten.
+    #[test]
+    fn forgetting_the_account_left_in_the_config_by_log_out_is_allowed() {
+        let m = desktop_machine("forget-after-log-out");
+        m.mem.plant_cookies(
+            &m.support().join("Cookies"),
+            crate::provider::desktop::types::CookieTable {
+                meta_version: 24,
+                rows: Vec::new(),
+            },
+        );
+        let (settled, _) = super::super::settle(&m.ctx, Some(ProviderId::Desktop)).unwrap();
+        super::super::forget(settled, &here(&m)).expect("nobody is signed in to it");
+        assert!(state::load(&m.ctx).unwrap().get(&here(&m)).is_none());
+    }
+
+    /// Claude opened after the last item moved, while the park was being written down: the
+    /// outgoing account is not recorded as parked, so the next run undoes the move rather
+    /// than finishing a switch over a folder the app may have written to.
+    #[test]
+    fn claude_starting_before_the_park_is_recorded_undoes_the_switch() {
+        let m = desktop_machine("before-park-recorded");
+        let before = m.inodes();
+        let mem = std::sync::Arc::clone(&m.mem);
+        let refused = fault::meanwhile(
+            "tree.park_stored",
+            move || {
+                mem.runs_within(APP_PATH);
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the app opened before the park was recorded");
+        assert!(matches!(refused, Error::AppStillOpen { .. }), "{refused:?}");
+        assert_stopped_partway(&refused);
+        assert_eq!(
+            state::load(&m.ctx).unwrap().get(&here(&m)).unwrap().parked,
+            None,
+            "the park was not recorded"
+        );
+
+        m.mem.quits_within();
+        let recovered = m
+            .recover()
+            .expect("recovered")
+            .expect("the interrupted switch was found");
+        assert!(!recovered.finished, "undone, not finished");
+        assert_eq!(m.inodes(), before, "every item is back where it was");
+        assert_eq!(m.whole("here"), super::super::harness::Whole::Live);
     }
 }

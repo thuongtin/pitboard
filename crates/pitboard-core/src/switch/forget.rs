@@ -1,9 +1,36 @@
 //! Dropping an account and the credentials parked for it.
 
 use super::{Error, Result, Settled, purge};
-use crate::provider;
+use crate::context::Context;
+use crate::provider::{self, ProviderId};
 use crate::service::Warning;
 use crate::state::{self, Key};
+
+/// What the tool's own files say of who is signed in.
+enum Live {
+    Account(String),
+    /// A folder login with no session in it. Its config may still name the account Log out
+    /// left behind, which nobody is signed in to.
+    SignedOut,
+    /// Nothing to go by, or a login that could not be read, which is never read as signed
+    /// out.
+    Unknown,
+}
+
+fn live_account(ctx: &Context, which: ProviderId) -> Live {
+    let tool = provider::of(which);
+    if let Some(tree) = tool.tree()
+        && let Some(root) = tree.root(ctx)
+        && let Ok(found) = tree.identify(ctx, &root)
+    {
+        return match found {
+            Some(live) => Live::Account(live.account_uuid),
+            None => Live::SignedOut,
+        };
+    }
+    tool.recorded_identity(ctx)
+        .map_or(Live::Unknown, |found| Live::Account(found.account_id))
+}
 
 /// Returns the account's email.
 pub fn forget(settled: Settled, key: &Key) -> Result<(String, Vec<Warning>)> {
@@ -15,13 +42,11 @@ pub fn forget(settled: Settled, key: &Key) -> Result<(String, Vec<Warning>)> {
     // Who is signed in is a fact about the machine. Pitboard's record of its last switch
     // is stale the moment someone signs in with the tool's own login command, and
     // forgetting the account that is actually in use throws away the only record of it.
-    // Asked of the tool's own files, so it answers offline: Claude Code's config, or a
-    // Codex login's own claims.
-    let live_uuid = provider::of(key.provider)
-        .recorded_identity(&ctx)
-        .map(|found| found.account_id);
-    let signed_in = match (&live_uuid, state.get(key)) {
-        (Some(uuid), Some(account)) => &account.account_uuid == uuid,
+    // Asked of the tool's own files, so it answers offline: Claude Code's config, a Codex
+    // login's own claims, or the session in Claude Desktop's data folder.
+    let signed_in = match (live_account(&ctx, key.provider), state.get(key)) {
+        (Live::SignedOut, _) => false,
+        (Live::Account(uuid), Some(account)) => account.account_uuid == uuid,
         // No live identity to compare against, so Pitboard's own record of the last switch
         // is all there is.
         _ => state.active_for(key.provider) == Some(key.label.as_str()),
