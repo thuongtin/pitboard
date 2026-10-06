@@ -270,9 +270,10 @@ When Codex's checks appear and Claude Code is absent, `doctor` leaves out most o
   | `codex_version` | `Codex build` | The installed Codex version, and the one Pitboard was checked against. Always `ok`. |
   | `codex_running` | `running Codex` | What runs `codex` as you, by kind, with process IDs: `codex` sessions, the ChatGPT app, Codex's background app server and Codex in an editor. Its advice says what makes each take a switch. Always `ok`. |
   | `desktop_version` | `Claude Desktop build` | The installed Claude Desktop version matches the one Pitboard's facts were read from. Always `ok`. |
-  | `desktop_version_unverified` | `Claude Desktop build` | In place of `desktop_version` when the installed version differs. Always warns. |
+  | `desktop_version_unverified` | `Claude Desktop build` | In place of `desktop_version` when the installed version differs or its bundle does not say. Always warns. |
   | `desktop_cookies` | `Claude Desktop cookies` | The version of Claude's cookie database is one Pitboard reads. |
   | `desktop_format_unknown` | `Claude Desktop cookies` | In place of `desktop_cookies` when the version is another. Always fails. |
+  | `desktop_cookies_unreadable` | `Claude Desktop cookies` | In place of `desktop_cookies` when the cookie database is there and cannot be read. Fails, or warns while Claude is open and may be writing it. |
   | `desktop_different_volume` | `Claude Desktop volume` | Only when Claude's data folder and Pitboard's parks are on different volumes. Always fails. |
   | `desktop_parks_not_private` | `Claude Desktop parks` | Only when others can reach the directory holding Claude Desktop parks. Always fails. |
   | `desktop_orphan_park` | `Claude Desktop parks` | Only when a Claude Desktop park is named by no account. Always warns. |

@@ -125,6 +125,9 @@ pub struct DesktopFacts {
     pub same_volume: Option<bool>,
     /// The cookie database's `meta.version`, where there is one that could be read.
     pub cookies_meta_version: Option<u32>,
+    /// Why the cookie database could not be read, where there is one and it could not.
+    /// A database that is not there is no failure.
+    pub cookies_error: Option<String>,
     /// Whether the two copies of the session cookie disagree.
     pub twins_differ: bool,
     /// Whether only this user can reach the parks directory. `None` where there is none.
@@ -363,7 +366,13 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
     let support_dir = tree.root(ctx);
     let table = support_dir
         .as_ref()
-        .and_then(|root| ctx.host().cookie_table(&paths::cookies_db(root)).ok());
+        .map(|root| ctx.host().cookie_table(&paths::cookies_db(root)));
+    let cookies_error = table
+        .as_ref()
+        .and_then(|read| read.as_ref().err())
+        .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
+        .map(ToString::to_string);
+    let table = table.and_then(Result::ok);
     // Where the parks are, or where Pitboard would make them.
     let parks_home = [parks_dir.clone(), paths::desktop_home(ctx), home::dir(ctx)]
         .into_iter()
@@ -418,6 +427,7 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         support_dir,
         same_volume,
         cookies_meta_version: table.as_ref().map(|t| t.meta_version),
+        cookies_error,
         twins_differ: table.as_ref().is_some_and(cookies::twins_differ),
         parks_dir_private,
         parks: park_names.len(),
@@ -1732,10 +1742,12 @@ fn judge_desktop(facts: &DesktopFacts, parks: &[&ParkFact], now: i64) -> Vec<Che
             "Claude Desktop build",
             format!("{installed}, which is what Pitboard's facts were read from"),
         ),
-        None if facts.installed => ok(
-            "desktop_version",
+        None if facts.installed => warn(
+            "desktop_version_unverified",
             "Claude Desktop build",
             format!("installed, and its version could not be read; Pitboard's facts were read from {verified}"),
+            "Switching still checks each item before it moves anything. If a switch refuses, \
+             `pitboard doctor` and the register say which fact changed.",
         ),
         None => ok(
             "desktop_version",
@@ -1760,6 +1772,32 @@ fn judge_desktop(facts: &DesktopFacts, parks: &[&ParkFact], now: i64) -> Vec<Che
             format!("version {found}"),
         )),
         None => {}
+    }
+    if let Some(reason) = &facts.cookies_error {
+        // A jar the app is writing can be busy for a moment, so while it runs this is only
+        // a warning; with the app closed, nothing else explains it.
+        let running = facts
+            .running
+            .as_ref()
+            .is_some_and(|holding| !holding.is_empty());
+        let (level, advice) = if running {
+            (
+                warn as fn(_, _, _, _) -> Check,
+                "Claude is open and may be writing it. Run `pitboard doctor` again once it is closed.",
+            )
+        } else {
+            (
+                fail as fn(_, _, _, _) -> Check,
+                "Pitboard cannot read which account Claude Desktop holds, so it will not switch \
+                 it. Nothing has been moved. Quit Claude and check the `Cookies` file in its data folder.",
+            )
+        };
+        checks.push(level(
+            "desktop_cookies_unreadable",
+            "Claude Desktop cookies",
+            format!("the cookie database could not be read: {reason}"),
+            advice,
+        ));
     }
     if facts.same_volume == Some(false) {
         checks.push(fail(
@@ -1980,6 +2018,7 @@ fn desktop_environment(facts: &DesktopFacts) -> Value {
         "support_dir": facts.support_dir,
         "same_volume": facts.same_volume,
         "cookies_meta_version": facts.cookies_meta_version,
+        "cookies_error": facts.cookies_error,
         "parks_dir_private": facts.parks_dir_private,
         "parks": facts.parks,
         "orphan_parks": facts.orphan_parks,
@@ -3554,6 +3593,7 @@ mod tests {
             support_dir: Some(PathBuf::from("/home/x/Library/Application Support/Claude")),
             same_volume: Some(true),
             cookies_meta_version: Some(24),
+            cookies_error: None,
             twins_differ: false,
             parks_dir_private: Some(true),
             parks: 1,
@@ -3629,10 +3669,40 @@ mod tests {
                 },
             ),
             (
+                "desktop_version_unverified",
+                Level::Warn,
+                DesktopFacts {
+                    version: None,
+                    ..desktop()
+                },
+            ),
+            (
                 "desktop_format_unknown",
                 Level::Fail,
                 DesktopFacts {
                     cookies_meta_version: Some(25),
+                    ..desktop()
+                },
+            ),
+            (
+                "desktop_cookies_unreadable",
+                Level::Fail,
+                DesktopFacts {
+                    cookies_meta_version: None,
+                    cookies_error: Some("not a database".into()),
+                    ..desktop()
+                },
+            ),
+            (
+                "desktop_cookies_unreadable",
+                Level::Warn,
+                DesktopFacts {
+                    cookies_meta_version: None,
+                    cookies_error: Some("database is locked".into()),
+                    running: Some(vec![crate::holder::Holding {
+                        holder: crate::provider::codex::holders::HOLDERS[0],
+                        pids: vec![1],
+                    }]),
                     ..desktop()
                 },
             ),
@@ -3770,6 +3840,23 @@ mod tests {
             .with_desktop_app(app.to_string_lossy().into_owned())
             .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding());
         m
+    }
+
+    /// A cookie database that is there and cannot be read is a failure doctor says, not a
+    /// section that quietly goes missing.
+    #[test]
+    fn an_unreadable_cookie_database_is_a_failure_doctor_says() {
+        let m = desktop_doctor("unreadable-jar");
+        m.mem.jar_fails(std::io::ErrorKind::InvalidData);
+        let facts = gather(&m.ctx);
+        let desktop = facts.desktop.as_ref().expect("a Claude Desktop section");
+        assert_eq!(desktop.cookies_meta_version, None);
+        assert!(desktop.cookies_error.is_some());
+        let checks = evaluate(&facts);
+        assert_eq!(
+            level_of(&checks, "desktop_cookies_unreadable"),
+            Some(Level::Fail)
+        );
     }
 
     /// A Claude Desktop park is a folder, so it is checked as one and never looked up in

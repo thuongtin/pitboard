@@ -421,9 +421,9 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         let from_park = parks.join(journal.from_park.as_deref().unwrap_or_default());
         let mut steps = Vec::new();
         for item in &journal.items {
-            let parked = tree::inode_at(&from_park.join(&item.path))?;
+            let parked = tree::inode_of_live(&from_park, &item.path)?;
             let there = root.join(&item.path);
-            let live = tree::inode_at(&there)?;
+            let live = tree::inode_of_live(&root, &item.path)?;
             match (parked, live) {
                 (Some(p), live) if Some(p) == item.from_inode => {
                     if live.is_some() {
@@ -491,7 +491,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     let mut steps = Vec::new();
     for item in &journal.items {
         let there = root.join(&item.path);
-        let live = tree::inode_at(&there)?;
+        let live = tree::inode_of_live(&root, &item.path)?;
         if item.from_inode.is_some() && live == item.from_inode {
             return Err(undetermined(format!(
                 "`{}` is still signed in after it was parked",
@@ -499,7 +499,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
             )));
         }
         let incoming = match &to_park {
-            Some(dir) => tree::inode_at(&dir.join(&item.path))?,
+            Some(dir) => tree::inode_of_live(dir, &item.path)?,
             None => None,
         };
         match (incoming, live) {
@@ -1055,6 +1055,35 @@ mod tests {
         std::fs::remove_dir_all(&wait).unwrap();
         m.recover().expect("recovered once the wait can go");
         assert!(pending(&m.ctx).is_none());
+    }
+
+    /// A recovery runs later than the switch it finishes, so a folder holding an item may
+    /// have become a link in between. Recovery would move what the link points at, which is
+    /// not Claude's folder, so it refuses before it moves anything, going back or forward.
+    #[test]
+    fn a_recovery_refuses_an_item_behind_a_folder_that_became_a_link() {
+        for point in ["tree.live_parked", "tree.park_recorded"] {
+            let m = desktop_machine(&format!("linked-{}", point.replace('.', "-")));
+            assert_eq!(m.crash_at(point).unwrap_err(), point);
+            let outside = m.support().with_file_name("outside-the-data-folder");
+            let store = outside.join("https_claude.ai_0.indexeddb.leveldb");
+            std::fs::create_dir_all(&store).unwrap();
+            std::fs::write(store.join("CURRENT"), "not Claude's").unwrap();
+            let indexed = m.support().join("IndexedDB");
+            let _ = std::fs::remove_dir_all(&indexed);
+            std::os::unix::fs::symlink(&outside, &indexed).unwrap();
+
+            let refused = m.recover().expect_err("a linked folder");
+            assert!(
+                matches!(refused, Error::DesktopDataInaccessible { .. }),
+                "{point}: {refused:?}"
+            );
+            assert!(pending(&m.ctx).is_some(), "{point}: the record is kept");
+            assert!(
+                store.join("CURRENT").exists(),
+                "{point}: what the link points at stays"
+            );
+        }
     }
 
     /// A record that lost an item, or lists one twice, would have recovery neither move nor

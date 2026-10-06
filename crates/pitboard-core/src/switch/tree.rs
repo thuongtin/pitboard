@@ -840,9 +840,10 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     fault::point("tree.recorded");
 
     // S12: done, and the incoming park's leftovers deleted. Somebody is signed in again, so
-    // a sign-out waiting for one is over.
-    tree_journal::clear(ctx)?;
+    // a sign-out waiting for one is over. The wait goes first: a wait that cannot go leaves
+    // the record, which a retry finishes from, rather than a switch nobody can finish.
     clear_awaiting(ctx)?;
+    tree_journal::clear(ctx)?;
     let pending = purge(ctx, &mut state);
 
     let warnings = (strays > 0)
@@ -1894,6 +1895,24 @@ mod tests {
         assert!(clear_awaiting(&m.ctx).is_err());
         std::fs::remove_dir_all(awaiting_path(&m.ctx)).unwrap();
         clear_awaiting(&m.ctx).expect("a record that is not there is already cleared");
+    }
+
+    /// The record of a switch is what a retry resumes from, so a wait that cannot be
+    /// removed must leave it in place: with it gone, the account is switched and the wait
+    /// stays, to offer the account already in use at the next launch.
+    #[test]
+    fn a_switch_whose_wait_cannot_be_cleared_keeps_its_record_for_a_retry() {
+        let m = desktop_machine("switch-wait-stuck");
+        std::fs::create_dir_all(awaiting_path(&m.ctx).join("not-a-file")).unwrap();
+        switch_to(&m, "there").expect_err("the wait cannot be removed");
+        assert!(
+            tree_journal::pending(&m.ctx).is_some(),
+            "the record is kept so that a retry can finish"
+        );
+        std::fs::remove_dir_all(awaiting_path(&m.ctx)).unwrap();
+        m.recover().expect("recovered once the wait can go");
+        assert!(tree_journal::pending(&m.ctx).is_none());
+        assert!(awaiting_sign_in(&m.ctx).is_none());
     }
 
     /// A parked account renamed while an add waits is still the one to put back, under its

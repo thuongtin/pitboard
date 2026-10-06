@@ -116,6 +116,21 @@ private struct DesktopCodeHelper {
     #expect(tool.codeEnvironment["PITBOARD_CLAUDE_DESKTOP_DIR"] == "\(here)/scratch/data")
 }
 
+/// A relative program with a directory in it is read from the app's directory, which the
+/// helper Terminal starts does not share. A bare name is looked up on the path and stays.
+@MainActor
+@Test func desktopCodeIsGivenAbsoluteClaudeProgramOnlyWhenItNamesADirectory() {
+    let here = FileManager.default.currentDirectoryPath
+    let relative = CommandLineTool(
+        home: "/tmp/fixture home", environment: ["PITBOARD_CLAUDE": "bin/claude"],
+        execute: { _ in nil })
+    #expect(relative.codeEnvironment["PITBOARD_CLAUDE"] == "\(here)/bin/claude")
+    let bare = CommandLineTool(
+        home: "/tmp/fixture home", environment: ["PITBOARD_CLAUDE": "claude"],
+        execute: { _ in nil })
+    #expect(bare.codeEnvironment["PITBOARD_CLAUDE"] == "claude")
+}
+
 /// Environment assignments are single arguments, even with shell metacharacters in paths.
 @MainActor
 @Test func desktopCodeQuotesOnlyAllowedEnvironmentArguments() throws {

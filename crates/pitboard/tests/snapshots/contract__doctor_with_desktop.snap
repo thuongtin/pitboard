@@ -10,6 +10,7 @@ expression: "value[\"data\"][\"environment\"][\"desktop\"]"
   "support_dir": "[path]",
   "same_volume": true,
   "cookies_meta_version": 24,
+  "cookies_error": null,
   "parks_dir_private": true,
   "parks": 1,
   "orphan_parks": [],

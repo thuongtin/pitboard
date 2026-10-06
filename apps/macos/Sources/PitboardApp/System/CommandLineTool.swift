@@ -56,7 +56,11 @@ struct CommandLineTool: Sendable {
             "PITBOARD_CLAUDE_DESKTOP_DIR": environment["PITBOARD_CLAUDE_DESKTOP_DIR"]
                 .map(Self.fromWorkingDirectory) ?? "\(home)/Library/Application Support/Claude",
         ]
-        codeEnvironment["PITBOARD_CLAUDE"] = environment["PITBOARD_CLAUDE"]
+        // A bare name is looked up on the path, wherever it runs; one with a directory in it
+        // is relative to this process.
+        codeEnvironment["PITBOARD_CLAUDE"] = environment["PITBOARD_CLAUDE"].map {
+            $0.contains("/") ? Self.fromWorkingDirectory($0) : $0
+        }
         self.init(
             helper: Settings.bundledCommandLine(in: bundle),
             installPlaces: commandLinePlaces(home: home), link: link,
