@@ -451,16 +451,22 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
                 "the config keys kept before the first move are gone".into(),
             ));
         }
+        let config = paths::config_file(&root);
+        let original = if kept.is_file() {
+            Some(kept_keys(&kept, &journal.config_keys.from).map_err(undetermined)?)
+        } else {
+            None
+        };
         let mut strays = moves::Strays::new();
+        if let Some(original) = &original {
+            keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, original)?;
+        }
         take(ctx, which, steps, &mut strays)?;
         // The app may have rewritten its config once the items were gone, so the keys kept
         // before the first move go back with them, unless it is as it was.
-        if kept.is_file() {
+        if let Some(original) = original {
             tree::still_quiet(ctx, which)?;
-            let config = paths::config_file(&root);
-            let original = kept_keys(&kept, &journal.config_keys.from).map_err(undetermined)?;
             if config::read_keys(&config)? != original {
-                keep_keys_of_strays(ctx, &mut strays, &config, &original)?;
                 config::splice(&config, &original)?;
             }
         }
@@ -515,24 +521,28 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
             }
         }
     }
+    let config = paths::config_file(&root);
+    let to_key = journal.side(&journal.to_label);
+    let keys = to_park.as_ref().map(|dir| dir.join(CONFIG_KEYS_FILE));
+    let incoming = match (&journal.operation, keys.filter(|keys| keys.is_file())) {
+        (Operation::Switch, Some(keys)) => {
+            Some(kept_keys(&keys, &journal.config_keys.to).map_err(undetermined)?)
+        }
+        _ => None,
+    };
     let mut strays = moves::Strays::new();
+    if let Some(incoming) = &incoming {
+        keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, incoming)?;
+    }
     take(ctx, which, steps, &mut strays)?;
     crate::fault::point("tree.recovery_moved");
 
     // The app rewrites its config as it runs, so it is asked once more, as before every move.
     tree::still_quiet(ctx, which)?;
-    let config = paths::config_file(&root);
-    let to_key = journal.side(&journal.to_label);
     match journal.operation {
         Operation::Switch => {
-            let keys = to_park.as_ref().map(|dir| dir.join(CONFIG_KEYS_FILE));
-            match keys.filter(|keys| keys.is_file()) {
-                Some(keys) => {
-                    let incoming =
-                        kept_keys(&keys, &journal.config_keys.to).map_err(undetermined)?;
-                    keep_keys_of_strays(ctx, &mut strays, &config, &incoming)?;
-                    config::splice(&config, &incoming)?;
-                }
+            match incoming {
+                Some(incoming) => config::splice(&config, &incoming)?,
                 // Spliced and the park deleted already, when the folder says so.
                 None if verified(ctx, journal, &root)? => {}
                 None => {
@@ -583,11 +593,13 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
             )?;
         }
     }
-    clear(ctx)?;
     if journal.operation == Operation::Switch {
-        // Somebody is signed in again, so a sign-out waiting for one is over.
+        // Somebody is signed in again, so a sign-out waiting for one is over. Before the
+        // record goes: the record is what a retry finishes this by, and a wait left behind
+        // with no record would be offered for ever.
         tree::clear_awaiting(ctx)?;
     }
+    clear(ctx)?;
     Ok(Recovered {
         from,
         to,
@@ -596,19 +608,23 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     })
 }
 
-/// The keys of the config a recovery is about to write over, set aside with the strays when
-/// the run set a login's items aside. They belong to a login the app made since the crash,
-/// and a session without them is only half of one. Nothing is kept when nothing was set
-/// aside, so the keys of an app that only rewrote its config are not.
+/// The keys of the config a recovery is about to write over, set aside with the strays
+/// before the first one is moved, when it sets a login's items aside. They belong to a login
+/// the app made since the crash, and a session without them is only half of one. Kept first,
+/// so a recovery stopped after the moves finds them kept; nothing is kept when nothing is
+/// set aside, so the keys of an app that only rewrote its config are not.
 fn keep_keys_of_strays(
     ctx: &Context,
+    which: ProviderId,
     strays: &mut moves::Strays,
     config: &Path,
+    steps: &[Step],
     incoming: &ConfigKeys,
 ) -> Result<()> {
-    if !strays.used() {
+    if !steps.iter().any(|step| matches!(step, Step::Stray(_))) {
         return Ok(());
     }
+    tree::still_quiet(ctx, which)?;
     let left = config::read_keys(config)?;
     if !left.0.is_empty() && left != *incoming {
         let slot = strays.dir(ctx)?;
@@ -869,6 +885,44 @@ mod tests {
         }
     }
 
+    /// A recovery stopped after it set a login's session aside, before the config was
+    /// written, is retried with the session already out of the folder, so the keys are kept
+    /// before the first move and not found missing by the retry.
+    #[test]
+    fn a_recovery_stopped_after_its_moves_has_kept_the_keys_of_a_login_claude_made() {
+        let m = desktop_machine("stray-keys-restart");
+        assert_eq!(
+            m.crash_at("tree.park_recorded").unwrap_err(),
+            "tree.park_recorded"
+        );
+        let cookies = m.support().join("Cookies");
+        assert!(!cookies.exists(), "the live session is parked");
+        std::fs::write(&cookies, b"made by Claude").unwrap();
+        m.mem.plant_cookies(&cookies, jar("v10made", NOW + 86_400));
+        let config = m.support().join("config.json");
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        written["oauth:tokenCacheV2"] = serde_json::json!("cache-made-by-claude");
+        std::fs::write(&config, written.to_string()).unwrap();
+
+        let stopped = crate::fault::killing("tree.recovery_moved", || m.recover());
+        assert_eq!(stopped.unwrap_err(), "tree.recovery_moved");
+        m.recover().expect("the retry finishes");
+        let mut kept = Vec::new();
+        crate::switch::harness::files_under(
+            &crate::provider::desktop::paths::strays_dir(&m.ctx),
+            &mut kept,
+        );
+        assert!(
+            kept.iter()
+                .filter(|path| path.file_name().is_some_and(|n| n == CONFIG_KEYS_FILE))
+                .any(|path| std::fs::read_to_string(path)
+                    .unwrap()
+                    .contains("cache-made-by-claude")),
+            "the keys of the login Claude made are set aside"
+        );
+    }
+
     #[test]
     fn a_tree_journal_from_elsewhere_is_left_alone() {
         let m = desktop_machine("elsewhere");
@@ -982,6 +1036,25 @@ mod tests {
             .expect("there was work to do");
         assert!(pending(&m.ctx).is_none(), "the record is gone");
         assert_eq!(tree::awaiting_sign_in(&m.ctx), None);
+    }
+
+    /// A wait for a sign-in that cannot be cleared keeps the record, so a retry clears it: with
+    /// the record gone first, the wait stayed and the app offered to put back an account that
+    /// was in use.
+    #[test]
+    fn a_wait_that_cannot_be_cleared_keeps_the_record_for_a_retry() {
+        let m = desktop_machine("awaiting-stuck");
+        assert_eq!(
+            m.crash_at("tree.park_recorded").unwrap_err(),
+            "tree.park_recorded"
+        );
+        let wait = crate::provider::desktop::paths::desktop_home(&m.ctx).join("awaiting.json");
+        std::fs::create_dir_all(wait.join("stuck")).unwrap();
+        m.recover().expect_err("the wait cannot be removed");
+        assert!(pending(&m.ctx).is_some(), "the record is kept");
+        std::fs::remove_dir_all(&wait).unwrap();
+        m.recover().expect("recovered once the wait can go");
+        assert!(pending(&m.ctx).is_none());
     }
 
     /// A record that lost an item, or lists one twice, would have recovery neither move nor

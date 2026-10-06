@@ -113,14 +113,20 @@ pub(crate) fn local_usage(ctx: &Context, account: &Account) -> Option<Snapshot> 
             length_seconds: usage::anthropic_window_length(kind),
         })
     };
+    let windows: Vec<Window> = [
+        window("five_hour", sample.u.fh),
+        window("seven_day", sample.u.sd),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // A sample with no usable number is a newer reading of nothing, and would blank what an
+    // older reading measured.
+    if windows.is_empty() {
+        return None;
+    }
     Some(Snapshot {
-        windows: [
-            window("five_hour", sample.u.fh),
-            window("seven_day", sample.u.sd),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
+        windows,
         observed_at: Some(sample.t.div_euclid(1000)),
         account_uuid: Some(account.account_uuid.clone()),
         source: Source::DesktopHistory,
@@ -281,6 +287,20 @@ mod tests {
             json.get("verified").is_none(),
             "a measured reading leaves the field out: {json}"
         );
+    }
+
+    #[test]
+    fn a_sample_with_no_usable_number_is_not_a_reading() {
+        let s = scratch("empty-sample");
+        std::fs::write(
+            s.0.join("Claude/plan-usage-history.json"),
+            serde_json::json!({"version": 2, "samples": [
+                {"t": 1_790_000_000_000_i64, "org": ORG, "u": {"fh": -1.0}}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(local_usage(&context(&s.0), &account(Some(ORG))), None);
     }
 
     #[test]

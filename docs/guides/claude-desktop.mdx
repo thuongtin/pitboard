@@ -20,7 +20,7 @@ A Claude Desktop label starts with `desktop/`. Claude Desktop has no sign-in Pit
 
 <Tabs>
   <Tab title="App">
-    1. If the Pitboard window shows **Give this account a name** for the account Claude is signed in to, click **Name**, enter a name such as `personal`, then click **Save**.
+    1. If the Pitboard window shows **Give this account a name** for the account Claude is signed in to, click **Name**. Enter a name such as `personal`, then click **Save**.
     2. Choose **Add Account** in Pitboard's menu, then choose **Claude Desktop** in the **Tool** pop-up menu. The **Add another Claude account** dialog opens.
     3. Click **Continue**. Pitboard quits Claude, parks `personal`, leaves Claude signed out and opens Claude again.
     4. Sign in to the other account in Claude. When you see its chats, click **I'm Signed In**.
@@ -110,7 +110,7 @@ When the same claude.ai account is enrolled in Claude Code and in Claude Desktop
     pitboard use work --both
     ```
 
-    If Claude is still open and Desktop needs to change accounts, Claude Code switches and the Desktop half stops with `app_still_open`. Quit Claude, then run `pitboard use desktop/work`.
+    If Claude is still open and Desktop needs to change accounts, Claude Code switches and the Desktop half stops with `app_still_open`. Quit Claude, then run the same `pitboard use work --both` again. Pitboard finds Claude Code already switched and retries the Desktop half.
   </Tab>
 </Tabs>
 
@@ -118,7 +118,7 @@ When the same claude.ai account is enrolled in Claude Code and in Claude Desktop
 
 - A parked Claude Desktop login cannot be renewed. Its sign-in lasts about 4 weeks, and `pitboard status` shows the date each parked one lapses. Switch to an account before that date to keep it. Pitboard warns 7 days ahead.
 - `pitboard renew` lists each parked Claude Desktop login as not renewable, with the date it lapses.
-- Pitboard reads whose a login is from Claude's files, without the network or the keychain. A new session under an account Pitboard knows is that account's, since Claude renews sessions on its own and replaces the account Log out leaves behind at the next sign-in. If Claude holds a session Pitboard knows as one label's under another account, Pitboard moves nothing and asks you to check the account in Claude and enrol it again.
+- Pitboard reads which account a login belongs to from Claude's files, without the network or the keychain. A new session under an account Pitboard knows is that account's. Claude renews sessions on its own. At the next sign-in it replaces the account that Log out leaves behind. If Claude holds a session Pitboard knows as one label's under another account, Pitboard moves nothing. It asks you to check the account in Claude and enrol it again.
 - Usage comes from Claude's own history, without reset times. Its numbers matched claude.ai's own count for two accounts, measured on 4 October 2026.
 - An interrupted switch waits until Claude is closed. Quit Claude, and Pitboard finishes it before the next change. [Interrupted switches](/concepts/switching#interrupted-switches) explains how.
 

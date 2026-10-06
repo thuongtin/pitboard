@@ -104,6 +104,18 @@ private struct DesktopCodeHelper {
     #expect(inferred.codeEnvironment == tool.codeEnvironment)
 }
 
+/// Terminal starts the helper in another directory, so a path the app was given relatively is
+/// handed over as the one the app's own core reads.
+@Test func desktopCodeIsGivenAbsolutePathsForRelativeOverrides() {
+    let tool = CommandLineTool(
+        home: "/tmp/fixture home",
+        environment: ["PITBOARD_HOME": "scratch/state", "PITBOARD_CLAUDE_DESKTOP_DIR": "scratch/data"],
+        execute: { _ in nil })
+    let here = FileManager.default.currentDirectoryPath
+    #expect(tool.codeEnvironment["PITBOARD_HOME"] == "\(here)/scratch/state")
+    #expect(tool.codeEnvironment["PITBOARD_CLAUDE_DESKTOP_DIR"] == "\(here)/scratch/data")
+}
+
 /// Environment assignments are single arguments, even with shell metacharacters in paths.
 @MainActor
 @Test func desktopCodeQuotesOnlyAllowedEnvironmentArguments() throws {

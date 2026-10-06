@@ -211,6 +211,30 @@ pub(super) fn inode_at(path: &Path) -> Result<Option<u64>> {
     })
 }
 
+/// The inode of `item` in the data folder at `root`, once no folder on the way to it is a
+/// link: a move would take what the link points at, which is not Claude's folder. The item
+/// itself may be one, and is moved as it is.
+pub(super) fn inode_of_live(root: &Path, item: &str) -> Result<Option<u64>> {
+    let mut walked = root.to_path_buf();
+    for part in Path::new(item)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+    {
+        walked.push(part);
+        if std::fs::symlink_metadata(&walked).is_ok_and(|found| found.file_type().is_symlink()) {
+            return Err(Error::DesktopDataInaccessible {
+                path: walked,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a folder holding a login's item is a link",
+                ),
+            });
+        }
+    }
+    inode_at(&root.join(item))
+}
+
 /// One item moved by one rename. A move made and then not synced is an error too, though
 /// the item is where it was moved to: it is not on disk yet, so the run stops with its
 /// record, which settles by where each item is, rather than carry on to delete the record
@@ -703,10 +727,9 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     // S1: the record of intent, naming every item by the inode it has now.
     let mut items = Vec::new();
     for item in tree.items() {
-        let from_inode = match from_key {
-            Some(_) => inode_at(&root.join(item.path))?,
-            None => None,
-        };
+        // Looked at with no one signed in as well: what the folder holds is set aside then.
+        let live = inode_of_live(&root, item.path)?;
+        let from_inode = from_key.as_ref().and(live);
         items.push(Item {
             path: item.path.to_string(),
             from_inode,
@@ -892,7 +915,7 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
     for item in tree.items() {
         items.push(Item {
             path: item.path.to_string(),
-            from_inode: inode_at(&root.join(item.path))?,
+            from_inode: inode_of_live(&root, item.path)?,
             to_inode: None,
         });
     }
@@ -1726,6 +1749,31 @@ mod tests {
         assert_eq!(m.inodes(), before);
         assert!(
             outside.join("inner").exists(),
+            "what the link points at stays"
+        );
+    }
+
+    /// `IndexedDB` in the live data folder being a link would have the park take the two
+    /// stores out of wherever it points, which is not Claude's folder, so nothing moves.
+    #[test]
+    fn a_live_item_behind_a_symlinked_folder_is_refused() {
+        let m = desktop_machine("live-symlinked-parent");
+        let outside = m.support().with_file_name("outside-the-data-folder");
+        let store = outside.join("https_claude.ai_0.indexeddb.leveldb");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("CURRENT"), "not Claude's").unwrap();
+        let indexed = m.support().join("IndexedDB");
+        let _ = std::fs::remove_dir_all(&indexed);
+        std::os::unix::fs::symlink(&outside, &indexed).unwrap();
+        let before = m.inodes();
+        let refused = switch_to(&m, "there").expect_err("a linked parent");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(m.inodes(), before);
+        assert!(
+            store.join("CURRENT").exists(),
             "what the link points at stays"
         );
     }

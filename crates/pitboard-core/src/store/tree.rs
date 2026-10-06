@@ -320,11 +320,6 @@ impl Strays {
         Ok(slot)
     }
 
-    /// Whether anything has been set aside, or a directory asked for, in this run.
-    pub(crate) fn used(&self) -> bool {
-        self.slot.is_some()
-    }
-
     /// The run's directory, made, for a file Pitboard writes into it.
     pub(crate) fn dir(&mut self, ctx: &Context) -> Result<PathBuf, Error> {
         let slot = self.chosen(ctx)?;

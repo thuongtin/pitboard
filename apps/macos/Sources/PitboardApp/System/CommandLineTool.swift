@@ -51,15 +51,22 @@ struct CommandLineTool: Sendable {
         let home = home ?? homeDirectory(environment: environment)
         var codeEnvironment = [
             "HOME": home,
-            "PITBOARD_HOME": environment["PITBOARD_HOME"] ?? "\(home)/.pitboard",
+            "PITBOARD_HOME": environment["PITBOARD_HOME"].map(Self.fromWorkingDirectory)
+                ?? "\(home)/.pitboard",
             "PITBOARD_CLAUDE_DESKTOP_DIR": environment["PITBOARD_CLAUDE_DESKTOP_DIR"]
-                ?? "\(home)/Library/Application Support/Claude",
+                .map(Self.fromWorkingDirectory) ?? "\(home)/Library/Application Support/Claude",
         ]
         codeEnvironment["PITBOARD_CLAUDE"] = environment["PITBOARD_CLAUDE"]
         self.init(
             helper: Settings.bundledCommandLine(in: bundle),
             installPlaces: commandLinePlaces(home: home), link: link,
             codeEnvironment: codeEnvironment, execute: execute)
+    }
+
+    /// A relative path as this app's core reads it, from this process's working directory.
+    /// Terminal starts the helper somewhere else, so it is handed the absolute one.
+    private static func fromWorkingDirectory(_ path: String) -> String {
+        path.isEmpty || path.hasPrefix("/") ? path : URL(fileURLWithPath: path).path
     }
 
     /// The first `pitboard` found.
