@@ -759,7 +759,14 @@ fn ask_tree(
     let account = match identity::whose(state, Some(live.clone())) {
         Ok(LiveOwner::Enrolled(key)) => state.get(&key).cloned(),
         Ok(LiveOwner::NotEnrolled(_) | LiveOwner::Nobody) => None,
-        Err(e) => return (held(not_asked_folder(ctx), e.to_string()), None),
+        Err(e) => {
+            // The session and the uuid name two accounts, so the config's uuid is no more
+            // to be trusted than the session: nobody is shown as signed in.
+            let mut login = held(Stale::LoginUnreadable, e.to_string());
+            login.recorded_uuid = None;
+            login.out_of_reach = true;
+            return (login, None);
+        }
     }
     .unwrap_or_else(|| unenrolled_folder(&live));
     let (usage, learned) = ask_folder(
@@ -3040,6 +3047,54 @@ mod tests {
         assert!(here.signed_in, "the account Pitboard last put there");
         assert_eq!(here.stale, Some(Stale::LiveUsageOff));
         assert!(here.usage.is_some());
+    }
+
+    /// A session Pitboard has seen as `there`'s, under the uuid the config gives `here`, is
+    /// neither account's: the folder's login is shown as one that cannot be read, and the
+    /// account the config names is not shown as the one in use.
+    #[test]
+    fn a_desktop_session_known_as_another_accounts_names_nobody() {
+        let m = crate::switch::harness::desktop_machine("status-conflict");
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding())
+            .with_scripted_api(ScriptedApi::new());
+        let mut state = crate::state::load(&ctx).expect("the machine's accounts");
+        let tree = crate::provider::of(ProviderId::Desktop)
+            .tree()
+            .expect("a folder login");
+        let root = tree.root(&ctx).expect("the app's folder");
+        let live = tree
+            .identify(&ctx, &root)
+            .expect("readable")
+            .expect("signed in");
+        let mut there = state
+            .get(&m.key("there"))
+            .expect("there is enrolled")
+            .clone();
+        there.detail = crate::state::Detail::Desktop {
+            organization_uuid: None,
+            session_fingerprint: live.fingerprint,
+            session_expires_at: None,
+        };
+        state.upsert(there);
+
+        let report = gather(&ctx, &state, false);
+        assert!(
+            report
+                .rows
+                .iter()
+                .filter(|r| r.provider == ProviderId::Desktop)
+                .all(|r| !r.signed_in),
+            "neither account is trusted as the one in use"
+        );
+        assert!(
+            report.rows.iter().any(|r| r.provider == ProviderId::Desktop
+                && r.unplaced()
+                && r.stale == Some(Stale::LoginUnreadable)),
+            "the login is said to be one that cannot be read"
+        );
     }
 
     /// A jar that cannot be read for good names nobody: the config still holds the account
