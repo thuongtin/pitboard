@@ -506,6 +506,28 @@ fn use_both_switches_the_same_account_in_the_other_claude_app() {
     assert_eq!(value["data"]["also"]["changed"], false, "{value}");
 }
 
+/// The two apps often name one claude.ai account the same. A bare label then names two
+/// accounts, and `--both` still finds the pair by its uuid rather than refusing as ambiguous.
+#[test]
+fn use_both_switches_a_pair_that_shares_its_label() {
+    let env = two_accounts("desktop-both-same-label");
+    let (a, b) = (env.uuid('a'), env.uuid('b'));
+    sign_in_desktop(&env, 'w', &b);
+    let (_, err, code) = env.run(&["enroll", "desktop/beta"]);
+    assert_eq!(code, 0, "enroll desktop/beta: {err}");
+    let (_, err, code) = env.run(&["use", "desktop", "--signed-out"]);
+    assert_eq!(code, 0, "{err}");
+    sign_in_desktop(&env, 'h', &a);
+    let (_, err, code) = env.run(&["enroll", "desktop/alpha"]);
+    assert_eq!(code, 0, "enroll desktop/alpha: {err}");
+
+    let (value, code) = json_of(&env, &["use", "beta", "--both"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["also"]["to"], "desktop/beta", "{value}");
+    assert_eq!(env.state()["active"]["claude"], "beta");
+    assert_eq!(signed_in_uuid(&env), Some(env.uuid('b')));
+}
+
 /// Without the same account in the other app, `--both` switches the one asked for and says
 /// there was nothing to switch alongside it. Without `--both`, the other app is left alone.
 #[test]

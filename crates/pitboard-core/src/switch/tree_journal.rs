@@ -452,6 +452,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
 
     if !forward {
         let from_park = parks.join(journal.from_park.as_deref().unwrap_or_default());
+        refuse_linked_park(&from_park).map_err(undetermined)?;
         let mut steps = Vec::new();
         for item in &journal.items {
             let parked = tree::inode_of_live(&from_park, &item.path)?;
@@ -521,6 +522,9 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     }
 
     let to_park = journal.to_park.as_deref().map(|name| parks.join(name));
+    if let Some(dir) = &to_park {
+        refuse_linked_park(dir).map_err(undetermined)?;
+    }
     let mut steps = Vec::new();
     let mut jar_installed = false;
     for item in &journal.items {
@@ -650,6 +654,18 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         finished: true,
         signed_out: journal.operation == Operation::SignOut,
     })
+}
+
+/// A park that is a link now is not the folder the run made: reading from it or cleaning it
+/// would reach what the link points at, outside Pitboard's parks.
+fn refuse_linked_park(park: &Path) -> std::result::Result<(), String> {
+    match std::fs::symlink_metadata(park) {
+        Ok(found) if found.file_type().is_symlink() => Err(format!(
+            "the park at {} is a link, not the folder the switch made",
+            park.display()
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// A jar found already installed is told by its inode, and a rewrite in place keeps that. A
@@ -1395,6 +1411,34 @@ mod tests {
             "nothing moved while one item is unknown"
         );
         assert!(pending(&m.ctx).is_some());
+    }
+
+    /// A park replaced by a link after the record was written is somewhere else: moving
+    /// from it or cleaning it would take or delete what the link points at.
+    #[test]
+    fn a_park_replaced_by_a_link_is_not_read_or_cleaned() {
+        let m = desktop_machine("linked-park");
+        assert_eq!(
+            m.crash_at("tree.live_parked").unwrap_err(),
+            "tree.live_parked"
+        );
+        let journal = read(&m.ctx).unwrap().unwrap();
+        let park = paths::parks_dir(&m.ctx).join(journal.from_park.unwrap());
+        let outside = m.support().with_file_name("outside-park");
+        std::fs::rename(&park, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &park).unwrap();
+        let mut before = Vec::new();
+        crate::switch::harness::files_under(&outside, &mut before);
+
+        let refused = m.recover().expect_err("a linked park");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        let mut after = Vec::new();
+        crate::switch::harness::files_under(&outside, &mut after);
+        assert_eq!(after, before, "what the link points at is untouched");
+        assert!(pending(&m.ctx).is_some(), "the record is kept");
     }
 
     #[test]

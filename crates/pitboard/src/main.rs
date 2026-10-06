@@ -520,6 +520,21 @@ fn use_account(pitboard: &Pitboard, label: &str) -> Report {
     switched(pitboard.switch_to(label))
 }
 
+/// `claude/work` for a bare `work` that Claude Code and Claude Desktop both have, as the
+/// same claude.ai account. `None` for any other label, so it resolves as it was typed.
+fn shared_label(pitboard: &Pitboard, label: &str) -> Option<String> {
+    if bare(label) != label || pitboard.account(label).is_some() {
+        return None;
+    }
+    let code = format!(
+        "{}{}{label}",
+        ProviderId::Claude.code(),
+        pitboard_core::label::SEPARATOR
+    );
+    let twin = pitboard.account(&pitboard.twin(&code)?)?;
+    (twin.provider() == ProviderId::Desktop && twin.label == label).then_some(code)
+}
+
 /// `pitboard use <label> --both`: the account, then the same claude.ai account in the other
 /// Claude app, found by its uuid whatever it is called there.
 ///
@@ -527,6 +542,10 @@ fn use_account(pitboard: &Pitboard, label: &str) -> Report {
 /// one that is refused, Claude Desktop's while Claude is open, leaves the other made. Asked
 /// again, the made one is already signed in and the other goes through.
 fn use_both(pitboard: &Pitboard, label: &str) -> Report {
+    // A bare label both apps use for one claude.ai account names two accounts, so it is
+    // taken as the Claude Code one and the pair is found from it.
+    let shared = shared_label(pitboard, label);
+    let label = shared.as_deref().unwrap_or(label);
     let Some(account) = pitboard.account(label) else {
         // Not enrolled: the switch refuses it in its own words.
         return use_account(pitboard, label);
