@@ -637,6 +637,9 @@ fn park_out(
 
     // The keys of the config as the account left them, kept before anything moves: the app
     // may rewrite its config once the items are gone, and an undo puts these back.
+    // The data folder is looked at again first: a link put in its place since it was
+    // checked would give the keys of whatever it points at.
+    anchored_root.still_there()?;
     let keys = config::read_keys(&paths::config_file(root))?;
     dir_anchor.still_there()?;
     write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys.0)?;
@@ -1566,6 +1569,50 @@ mod tests {
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "nothing was written where the link points"
         );
+    }
+
+    /// The data folder can be replaced by a link between the check and the read of its keys,
+    /// which would put another folder's keys in the park of this account.
+    #[test]
+    fn a_data_folder_that_became_a_link_gives_the_park_no_keys() {
+        let m = desktop_machine("root-linked-before-keys");
+        let outside = m.support().with_file_name("outside-keys");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("config.json"),
+            br#"{"lastKnownAccountUuid":"somebody-else"}"#,
+        )
+        .unwrap();
+        let (support, moved, linked) = (
+            m.support(),
+            m.support().with_file_name("moved-support"),
+            outside.clone(),
+        );
+        let refused = fault::meanwhile(
+            "tree.park_made",
+            move || {
+                std::fs::rename(&support, &moved).unwrap();
+                std::os::unix::fs::symlink(&linked, &support).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the data folder became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        let there = m.there_park();
+        for entry in std::fs::read_dir(paths::parks_dir(&m.ctx))
+            .unwrap()
+            .flatten()
+        {
+            if entry.file_name().to_string_lossy() != there {
+                assert!(
+                    !entry.path().join(CONFIG_KEYS_FILE).exists(),
+                    "the keys of the folder the link points at were kept"
+                );
+            }
+        }
     }
 
     /// The park is looked at again after the last item is in it: a link put there now would

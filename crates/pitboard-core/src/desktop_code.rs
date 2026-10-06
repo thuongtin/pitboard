@@ -192,7 +192,18 @@ pub(crate) fn prepare(ctx: &Context, label: &str) -> Result<DesktopCodeSession, 
         label: label.into(),
         enrolled: state.labels(ProviderId::Desktop),
     })?;
-    let path = if let Some(park) = &account.parked {
+    let live = paths::support_dir(ctx).filter(|root| {
+        // Where the live login is this account's own, the app has kept it fresh and the park
+        // is the older copy. Whatever keeps the live folder from being read leaves the park.
+        identity::identify_tree(ctx, root)
+            .and_then(|found| identity::whose(&state, found))
+            .is_ok_and(
+                |owner| matches!(owner, identity::LiveOwner::Enrolled(owned) if owned == key),
+            )
+    });
+    let path = if let Some(root) = live {
+        paths::config_file(&root)
+    } else if let Some(park) = &account.parked {
         crate::switch::check_tree_park(ctx, label, account, park)?.join("config-keys.json")
     } else {
         let root = paths::support_dir(ctx).ok_or(DesktopCodeError::IdentityChanged)?;
@@ -375,6 +386,37 @@ mod tests {
                 state_before
             );
         }
+    }
+
+    /// An account whose park is older than the login the app now holds for it: the live one
+    /// is the grant Desktop keeps renewing, so the stale park must not be what is read.
+    #[test]
+    fn a_parked_account_signed_in_live_again_uses_the_live_grant() {
+        let m = desktop_machine("code-live-over-park");
+        m.plant_live("there", "v10there");
+        plant(
+            &m.support().join("config.json"),
+            "there",
+            (NOW + 3600) * 1000,
+        );
+        plant(
+            &paths::parks_dir(&m.ctx)
+                .join(m.there_park())
+                .join("config-keys.json"),
+            "there",
+            NOW * 1000,
+        );
+        let api = ScriptedApi::new();
+        owned(&api, "there");
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_api(api)
+            .with_scripted_safe_storage(ScriptedSafeStorage::holding("fixture-password"));
+
+        let session = prepare(&ctx, "there").expect("the live grant is the fresh one");
+
+        assert_eq!(session.expires_at(), NOW + 3600);
     }
 
     #[test]

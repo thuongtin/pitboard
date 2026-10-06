@@ -25,7 +25,7 @@ Pitboard never renews the login a tool is using. Renewing a parked login that co
 
 A parked login the service refuses is dropped, and its account needs a sign-in again. A parked login the service could not renew, because the service was unreachable or asked for less traffic, is tried again next time.
 
-A parked Claude Desktop login cannot be renewed. `renew` sends nothing for it and prints a line of its own with the date its sign-in lapses, as in `desktop/work: not renewable; its sign-in lapses 2026-10-30`. To keep that account, switch to it before then. With `--json`, its outcome is `not_renewable` with `expires_at`.
+A parked Claude Desktop login cannot be renewed. `renew` sends nothing for it. It prints the date the sign-in lapses, as in `desktop/work: not renewable; its sign-in lapses 2026-10-30`. To keep that account, switch to it before then. With `--json`, its outcome is `not_renewable` with `expires_at`.
 
 `renew` prints one of these lines, and exits with status 0 even when nothing could be renewed. **Renew Now** in the app's settings shows the same lines:
 

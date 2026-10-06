@@ -126,7 +126,7 @@ For each exit status, see [Exit codes](/reference/commands#exit-codes). In the t
 
 Claude Desktop also uses codes from earlier sections. `live_credential_absent` means Claude is signed out. `nothing_parked`, `parked_credential_missing` and `parked_credential_corrupt` refer to a park folder in `~/.pitboard/desktop/parks`, and `parked_login_expired` means its sign-in lapsed. For these, the advice is to run `pitboard use desktop --signed-out`, sign in to the account in Claude, quit Claude, then run `pitboard enroll desktop/<label>`.
 
-The app quits Claude itself, so it shows `app_still_open` only when Claude does not quit within 30 seconds. It opens Claude again after a switch, except when the switch stopped partway: then it leaves Claude closed, so the next change can finish it. For a Claude Desktop error, the app says what to do in the app instead of which command to run.
+The app quits Claude itself, so it shows `app_still_open` only when Claude does not quit within 30 seconds. It opens Claude again after a switch. When the switch stopped partway, it leaves Claude closed so the next change can finish it. For a Claude Desktop error, the app says what to do in the app instead of which command to run.
 
 ## Keychain and locks
 

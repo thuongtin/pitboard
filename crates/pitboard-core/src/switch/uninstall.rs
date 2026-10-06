@@ -123,11 +123,21 @@ fn remove_all_but(dir: &Path, kept: &[PathBuf]) -> bool {
     if kept.is_empty() {
         return std::fs::remove_dir_all(dir).is_ok();
     }
+    let Some(before) = real_folder_identity(dir) else {
+        return false;
+    };
+    crate::fault::point("uninstall.home_removing");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
+    let entries: Vec<_> = entries.flatten().collect();
+    // A link put in the folder's place after the check lists, and would then delete, what it
+    // points at.
+    if real_folder_identity(dir) != Some(before) {
+        return false;
+    }
     let mut gone = true;
-    for entry in entries.flatten() {
+    for entry in entries {
         let path = entry.path();
         let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
         let removed = if kept.contains(&path) {
@@ -142,6 +152,13 @@ fn remove_all_but(dir: &Path, kept: &[PathBuf]) -> bool {
         gone &= removed;
     }
     gone && std::fs::remove_dir(dir).is_ok()
+}
+
+/// The device and inode of `dir` itself, or nothing where it is a link or not a folder.
+fn real_folder_identity(dir: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let found = std::fs::symlink_metadata(dir).ok()?;
+    found.is_dir().then(|| (found.dev(), found.ino()))
 }
 
 #[cfg(test)]
@@ -290,5 +307,34 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(left, ["desktop"], "nothing else of Pitboard's is left");
+    }
+
+    /// A home that became a link while the uninstall was deciding what to delete is not the
+    /// folder it decided under: what the link points at is not Pitboard's to delete.
+    #[test]
+    fn a_home_that_became_a_link_deletes_nothing_it_points_at() {
+        use super::super::harness::desktop_machine;
+        let m = desktop_machine("uninstall-linked-home");
+        let home_dir = home::dir(&m.ctx);
+        let outside = m.ctx.home.join("outside-folder");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precious.txt"), b"not Pitboard's").unwrap();
+        let kept = vec![paths::strays_dir(&m.ctx)];
+        std::fs::create_dir_all(&kept[0]).unwrap();
+        std::fs::write(kept[0].join("1-Cookies"), b"made by Claude").unwrap();
+        let (moved, link_to) = (m.ctx.home.join("moved-home"), outside.clone());
+        let at = home_dir.clone();
+
+        let gone = crate::fault::meanwhile(
+            "uninstall.home_removing",
+            move || {
+                std::fs::rename(&at, &moved).unwrap();
+                std::os::unix::fs::symlink(&link_to, &at).unwrap();
+            },
+            || remove_home(&m.ctx, &kept),
+        );
+
+        assert!(!gone, "the home is not the folder that was checked");
+        assert!(outside.join("precious.txt").exists());
     }
 }
