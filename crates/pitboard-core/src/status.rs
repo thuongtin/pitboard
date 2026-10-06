@@ -1279,6 +1279,31 @@ fn assemble(
             });
             continue;
         }
+        // Offline nobody is asked, so a folder login has only the uuid its cookie jar names;
+        // that is still enough to say who is signed in, as the online read would.
+        if is_tree(which)
+            && live.signed_in.is_none()
+            && !facts.asked
+            && let Some(uuid) = live.recorded_uuid.as_deref().filter(|u| !u.is_empty())
+            && !rows
+                .iter()
+                .any(|r| r.provider == which && r.account_uuid == uuid)
+        {
+            let key = crate::state::usage_key(which, uuid);
+            let (usage, stale) = reading(&key, &live.usage(), None);
+            rows.push(Row {
+                provider: which,
+                label: None,
+                email: String::new(),
+                account_uuid: uuid.to_string(),
+                signed_in: true,
+                parked: None,
+                usage,
+                stale,
+                runway: lasting(&key),
+            });
+            continue;
+        }
         // A login that could not be read, or was read and is not one account's, and that no
         // record pins on any of the tool's accounts. Said, rather than left out, because
         // leaving it out reads as nobody being signed in; but only for a tool somebody uses
@@ -2859,6 +2884,38 @@ mod tests {
             },
         );
         assert_eq!(signed_in(&gather_offline(&ctx, &state)), 0);
+    }
+
+    /// A first Desktop login nothing has enrolled is shown offline too, from the uuid its
+    /// folder names, so the menu bar between reads does not read as nobody signed in.
+    #[test]
+    fn offline_a_desktop_login_nothing_has_enrolled_still_has_a_row() {
+        let m = crate::switch::harness::desktop_machine("status-offline-first-login");
+        let app = m.support().with_file_name("Claude.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "").unwrap();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_desktop_app(app.to_string_lossy().into())
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding());
+        let rows = |report: &Report| {
+            report
+                .rows
+                .iter()
+                .filter(|r| r.provider == ProviderId::Desktop)
+                .map(|r| (r.label.clone(), r.signed_in, r.account_uuid.clone()))
+                .collect::<Vec<_>>()
+        };
+        let enrolled = gather_offline(&ctx, &crate::state::load(&ctx).unwrap());
+        let uuid = rows(&enrolled)
+            .into_iter()
+            .find(|(_, signed_in, _)| *signed_in)
+            .expect("the signed in account")
+            .2;
+
+        let report = gather_offline(&ctx, &State::default());
+        assert_eq!(rows(&report), vec![(None, true, uuid)]);
     }
 
     /// A reading remembered under the app's usage key comes back with the account's own id,

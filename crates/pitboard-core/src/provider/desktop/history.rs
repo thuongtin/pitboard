@@ -80,11 +80,14 @@ pub(crate) fn local_usage(ctx: &Context, account: &Account) -> Option<Snapshot> 
     if history.version != VERSION {
         return None;
     }
+    // A sample with no usable number is a newer reading of nothing, and would blank what an
+    // older one measured: the newest one that has a number is the one that counts.
+    let usable = |percent: Option<f64>| percent.is_some_and(|p| p.is_finite() && p >= 0.0);
     let newest_of = |org: &str| {
         history
             .samples
             .iter()
-            .filter(|s| s.org == org)
+            .filter(|s| s.org == org && (usable(s.u.fh) || usable(s.u.sd)))
             .max_by_key(|s| s.t)
     };
     let known = match &account.detail {
@@ -120,11 +123,6 @@ pub(crate) fn local_usage(ctx: &Context, account: &Account) -> Option<Snapshot> 
     .into_iter()
     .flatten()
     .collect();
-    // A sample with no usable number is a newer reading of nothing, and would blank what an
-    // older reading measured.
-    if windows.is_empty() {
-        return None;
-    }
     Some(Snapshot {
         windows,
         observed_at: Some(sample.t.div_euclid(1000)),
@@ -301,6 +299,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(local_usage(&context(&s.0), &account(Some(ORG))), None);
+    }
+
+    #[test]
+    fn a_newer_sample_with_no_usable_number_does_not_hide_an_older_one() {
+        let s = scratch("older-valid");
+        std::fs::write(
+            s.0.join("Claude/plan-usage-history.json"),
+            serde_json::json!({"version": 2, "samples": [
+                {"t": 1_790_000_000_000_i64, "org": ORG, "u": {"fh": 10.0, "sd": 20.0}},
+                {"t": 1_790_000_600_000_i64, "org": ORG, "u": {"fh": -1.0}}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let ctx = context(&s.0);
+        let read = local_usage(&ctx, &account(Some(ORG))).expect("the older sample");
+        assert_eq!(
+            percents(&read),
+            vec![("five_hour".into(), 10.0), ("seven_day".into(), 20.0)]
+        );
+        assert_eq!(read.observed_at, Some(1_790_000_000));
+
+        // Without a known organisation, the same holds for each one the account used.
+        used_in(&s.0, "claude-code-sessions", ORG);
+        let read = local_usage(&ctx, &account(None)).expect("the older sample");
+        assert_eq!(read.observed_at, Some(1_790_000_000));
     }
 
     #[test]
