@@ -771,7 +771,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
 
     // S12: done, and the incoming park's leftovers deleted. Somebody is signed in again, so
     // a sign-out waiting for one is over.
-    tree_journal::clear(ctx);
+    tree_journal::clear(ctx)?;
     clear_awaiting(ctx);
     let pending = purge(ctx, &mut state);
 
@@ -902,7 +902,7 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
             started_at: ctx.now(),
         },
     )?;
-    tree_journal::clear(ctx);
+    tree_journal::clear(ctx)?;
     let pending = purge(ctx, &mut state);
     let warnings = (pending > 0)
         .then_some(Warning::ParksPendingRemoval(pending))

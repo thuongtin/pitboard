@@ -159,6 +159,16 @@ impl TreeJournal {
                 return Err(format!("`{park}` is not the name of a park of Pitboard's"));
             }
         }
+        // Every item of the account is listed once: one left out would be neither moved nor
+        // checked, and purged with the park it was in.
+        if self.items.len() != tree.items().len() {
+            return Err("it does not list each item of the account's once".into());
+        }
+        for known in tree.items() {
+            if !self.items.iter().any(|item| item.path == known.path) {
+                return Err(format!("it does not list `{}`", known.path));
+            }
+        }
         for item in &self.items {
             if !tree.items().iter().any(|known| known.path == item.path) {
                 return Err(format!("`{}` is not an item of the account's", item.path));
@@ -213,9 +223,16 @@ pub(super) fn write(ctx: &Context, journal: &TreeJournal) -> Result<()> {
         .map_err(|source| Error::RecoveryFailed { path, source })
 }
 
-/// The run reached a state the state file fully describes.
-pub(super) fn clear(ctx: &Context) {
-    let _ = std::fs::remove_file(path(ctx));
+/// The run reached a state the state file fully describes. A record that stays is replayed
+/// by every later command and refuses the next run, so one that cannot be removed is an
+/// error; one already gone is not.
+pub(super) fn clear(ctx: &Context) -> Result<()> {
+    let path = path(ctx);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::RecoveryFailed { path, source }),
+    }
 }
 
 /// The interrupted folder switch the next command about its tool will finish or undo, as
@@ -422,7 +439,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         if std::fs::symlink_metadata(&from_park).is_ok() {
             strays.set_aside(ctx, &from_park)?;
         }
-        clear(ctx);
+        clear(ctx)?;
         return Ok(Recovered {
             from,
             to,
@@ -527,7 +544,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
             )?;
         }
     }
-    clear(ctx);
+    clear(ctx)?;
     Ok(Recovered {
         from,
         to,
@@ -601,7 +618,7 @@ pub(super) fn abandon(ctx: &Context, state: &mut State) -> Result<Option<Abandon
         return Ok(None);
     }
     let Ok(Some(journal)) = read(ctx) else {
-        clear(ctx);
+        clear(ctx)?;
         return Ok(Some(Abandoned {
             from: String::new(),
             to: String::new(),
@@ -619,7 +636,7 @@ pub(super) fn abandon(ctx: &Context, state: &mut State) -> Result<Option<Abandon
             .count();
     }
     let (from, to) = journal.named(state);
-    clear(ctx);
+    clear(ctx)?;
     Ok(Some(Abandoned { from, to, kept }))
 }
 
@@ -825,6 +842,53 @@ mod tests {
         assert!(abandoned.is_some());
         assert!(pending(&m.ctx).is_none());
         assert_eq!(m.inodes(), during);
+    }
+
+    /// A record that lost an item, or lists one twice, would have recovery neither move nor
+    /// check that item, and then purge it with the park: it is corrupt, not recovered.
+    #[test]
+    fn a_tree_journal_missing_or_repeating_an_item_is_corrupt() {
+        let m = desktop_machine("incomplete");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let during = m.inodes();
+        let record = path(&m.ctx);
+        let whole: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        let count = whole["items"].as_array().unwrap().len();
+        assert!(count > 1, "a tree has several items");
+
+        let mut lost = whole.clone();
+        lost["items"].as_array_mut().unwrap().pop();
+        let mut twice = whole.clone();
+        let first = twice["items"][0].clone();
+        *twice["items"].as_array_mut().unwrap().last_mut().unwrap() = first;
+        for damaged in [lost, twice] {
+            std::fs::write(&record, damaged.to_string()).unwrap();
+            let refused = m.recover().expect_err("damaged");
+            assert!(
+                matches!(refused, Error::RecoveryRecordCorrupt { .. }),
+                "{refused:?}"
+            );
+            assert_eq!(m.inodes(), during, "nothing moved on a guess");
+        }
+    }
+
+    /// The record is what says a run is unfinished, so a run is not finished while it is still
+    /// there: a record that cannot be removed is an error, and one already gone is not.
+    #[test]
+    fn a_record_that_cannot_be_removed_is_an_error() {
+        let m = desktop_machine("clear-fails");
+        assert!(clear(&m.ctx).is_ok(), "nothing to remove is not a failure");
+        let record = path(&m.ctx);
+        std::fs::create_dir_all(record.join("not-a-file")).unwrap();
+        let refused = clear(&m.ctx).expect_err("a directory is not removed as a file");
+        assert!(
+            matches!(refused, Error::RecoveryFailed { .. }),
+            "{refused:?}"
+        );
     }
 
     #[test]

@@ -721,6 +721,13 @@ public final class AppModel {
         status?.accounts.filter { $0.signedIn && $0.label == nil && !$0.unplaced } ?? []
     }
 
+    /// The Claude Desktop login signed in now that is not enrolled, when no add is waiting
+    /// for a sign-in. The first Desktop account has to be named before it can be put aside
+    /// for another; an add under way is the case where the login signed in is the new one.
+    var unnamedDesktopLogin: Account? {
+        desktopAwaiting == nil ? unnamed.first { $0.provider == desktopProvider } : nil
+    }
+
     /// A login signed in now that is not enrolled, in any tool.
     var unenrolled: Bool { !unnamed.isEmpty }
 

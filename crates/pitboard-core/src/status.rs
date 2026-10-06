@@ -13,6 +13,7 @@ use crate::api::{self, ApiError, Owner};
 use crate::context::Context;
 use crate::error::Cause;
 use crate::provider::claude::paths as claude;
+use crate::provider::desktop::identity::{self, LiveOwner};
 use crate::provider::desktop::live_usage;
 use crate::provider::{ProviderError, ProviderId};
 use crate::state::Account;
@@ -706,10 +707,14 @@ fn ask_tree(
         Ok(None) => return (LiveLogin::default(), None),
         Err(e) => return (held(not_asked_folder(ctx), e.to_string()), None),
     };
-    let account = state
-        .by_uuid(which, &live.account_uuid)
-        .cloned()
-        .unwrap_or_else(|| unenrolled_folder(&live));
+    // The account the folder's config names, unless the session is known as another's: then
+    // nobody is asked, as claude.ai would be given one account's session under another's name.
+    let account = match identity::whose(state, Some(live.clone())) {
+        Ok(LiveOwner::Enrolled(key)) => state.get(&key).cloned(),
+        Ok(LiveOwner::NotEnrolled(_) | LiveOwner::Nobody) => None,
+        Err(e) => return (held(not_asked_folder(ctx), e.to_string()), None),
+    }
+    .unwrap_or_else(|| unenrolled_folder(&live));
     let (usage, learned) = ask_folder(
         ctx,
         &root,
@@ -2659,6 +2664,60 @@ mod tests {
 
         let (answer, learned) = ask_folder(&ctx, &dir, &there, Some(&park), None, true);
         assert_eq!(answer.unwrap_err(), Stale::ParkUnreadable);
+        assert!(learned.is_none());
+        assert_eq!(api.calls(), 0, "nobody was asked");
+    }
+
+    /// A folder whose config names one account while its session is known as another's is
+    /// nobody's to ask about: claude.ai would be given the other account's session under
+    /// this one's name.
+    #[test]
+    fn a_live_folder_whose_session_is_another_accounts_is_not_asked_about() {
+        let m = crate::switch::harness::desktop_machine("status-mixed-live");
+        let api = ScriptedApi::new();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding())
+            .with_scripted_api(Arc::clone(&api));
+        live_usage::save(
+            &ctx,
+            &LiveUsage {
+                enabled: true,
+                approval: Approval::Granted,
+                ..LiveUsage::default()
+            },
+        )
+        .unwrap();
+        let live = crate::provider::desktop::identity::identify_tree(&ctx, &m.support())
+            .expect("a readable folder")
+            .expect("signed in");
+        // `there` is recorded with the session the folder holds, whose uuid is `here`'s.
+        let mut state = crate::state::load(&ctx).expect("the machine's accounts");
+        let mut there = state.get(&m.key("there")).expect("there").clone();
+        match &mut there.detail {
+            crate::state::Detail::Desktop {
+                session_fingerprint,
+                ..
+            } => *session_fingerprint = live.fingerprint.clone(),
+            other => panic!("{other:?}"),
+        }
+        state.upsert(there);
+
+        let (login, learned) = ask_tree(
+            &ctx,
+            ProviderId::Desktop,
+            &state,
+            false,
+            &HashMap::new(),
+            true,
+        );
+        assert!(
+            matches!(login.signed_in, Some(Err(_))),
+            "the owner is not settled: {:?}",
+            login.signed_in
+        );
+        assert!(matches!(login.usage, Some(Err(_))));
         assert!(learned.is_none());
         assert_eq!(api.calls(), 0, "nobody was asked");
     }

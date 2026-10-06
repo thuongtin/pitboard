@@ -10,7 +10,14 @@ struct AccountSheetView: View {
         switch sheet {
         // Claude Desktop signs in inside Claude, so it has a sheet of its own.
         case .add where model.provider(for: sheet) == desktopProvider:
-            DesktopSignInSheet(model: model, again: nil)
+            // Putting aside a login nobody has named is refused, since it could not be put
+            // back by name, so that login is named first. Halfway through an add, the login
+            // signed in is the new account, and the sheet's own last step names it.
+            if let login = model.unnamedDesktopLogin {
+                NameSheet(model: model, provider: desktopProvider, email: login.email)
+            } else {
+                DesktopSignInSheet(model: model, again: nil)
+            }
         case .add(let provider):
             SignInSheet(model: model, provider: provider, again: nil)
         case .signInAgain(desktopProvider, let label):
