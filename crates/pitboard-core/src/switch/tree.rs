@@ -239,6 +239,9 @@ pub(super) fn inode_of_live(root: &Path, item: &str) -> Result<Option<u64>> {
 pub(super) struct Anchored {
     pub(super) path: PathBuf,
     real: Option<PathBuf>,
+    /// The device and inode of the folder itself: one deleted and made again at the same
+    /// path resolves to the same path and is not the folder the steps were decided under.
+    identity: Option<(u64, u64)>,
 }
 
 impl Anchored {
@@ -246,12 +249,15 @@ impl Anchored {
         Self {
             path: path.to_path_buf(),
             real: std::fs::canonicalize(path).ok(),
+            identity: identity_of(path),
         }
     }
 
     /// Refuses a folder that is somewhere else now, as a link put in its place is.
     pub(super) fn still_there(&self) -> Result<()> {
-        if std::fs::canonicalize(&self.path).ok() == self.real {
+        if std::fs::canonicalize(&self.path).ok() == self.real
+            && identity_of(&self.path) == self.identity
+        {
             return Ok(());
         }
         Err(Error::DesktopDataInaccessible {
@@ -262,6 +268,14 @@ impl Anchored {
             ),
         })
     }
+}
+
+/// The device and inode of the folder at `path`, or of what a link at it points at.
+fn identity_of(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|found| (found.dev(), found.ino()))
 }
 
 /// One item moved by one rename. A move made and then not synced is an error too, though
@@ -607,6 +621,9 @@ fn park_out(
         // The folders themselves are looked at again: a link put in the place of either is
         // not on the way to an item, and a rename follows it.
         anchors.iter().try_for_each(|anchor| anchor.still_there())?;
+        // And the way inside the park: a folder made there for an earlier item can have
+        // become a link, which the rename would put this one through.
+        inode_of_live(&dir, &item.path)?;
         move_item(&root.join(&item.path), &dir.join(&item.path))?;
         moved.push(item.path.clone());
         if moved.len() == 1 {
@@ -1344,6 +1361,115 @@ mod tests {
             "{\"locale\":\"elsewhere\"}",
             "the config where the link points is left alone"
         );
+    }
+
+    /// A folder deleted and made again at the same path resolves to the same path.
+    #[test]
+    fn a_data_folder_made_again_before_a_move_is_not_moved_into() {
+        let m = desktop_machine("root-made-again");
+        let support = m.support();
+        let aside = support.with_file_name("Claude-made-again-aside");
+        let refused = fault::meanwhile(
+            "tree.install_checked",
+            move || {
+                std::fs::rename(&support, &aside).unwrap();
+                std::fs::create_dir(&support).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the data folder is another folder now");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(m.support()).unwrap().next().is_none(),
+            "nothing was installed into the other folder"
+        );
+    }
+
+    /// A folder made in the new park for an earlier item can become a link before a later
+    /// one is moved through it.
+    #[test]
+    fn a_folder_in_the_new_park_that_became_a_link_is_not_moved_through() {
+        let m = desktop_machine("park-parent-linked");
+        let outside = m.support().with_file_name("outside-park-parent");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parks = paths::parks_dir(&m.ctx);
+        let there = m.there_park();
+        let (linked, in_parks) = (outside.clone(), parks.clone());
+        let refused = fault::meanwhile(
+            "tree.park_move_checked",
+            move || {
+                for entry in std::fs::read_dir(&in_parks).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy() != there {
+                        std::os::unix::fs::symlink(&linked, entry.path().join("IndexedDB"))
+                            .unwrap();
+                    }
+                }
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("a folder in the park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was moved to where the link points"
+        );
+    }
+
+    /// A sign-out stopped after the account was parked, and Claude signed in to another
+    /// account before recovery: that login's keys are set aside with its session, not lost.
+    #[test]
+    fn a_sign_out_recovery_keeps_the_keys_of_a_login_made_since() {
+        let m = desktop_machine("sign-out-recovery-keys");
+        let killed = fault::killing("tree.park_recorded", || signing_out(&m));
+        assert_eq!(killed.unwrap_err(), "tree.park_recorded");
+        m.plant_live("third", "v10third");
+        m.recover().expect("recovered");
+        let mut kept = Vec::new();
+        super::super::harness::files_under(&paths::strays_dir(&m.ctx), &mut kept);
+        assert!(
+            kept.iter()
+                .filter(|p| p.file_name().is_some_and(|n| n == CONFIG_KEYS_FILE))
+                .map(|p| config::read_keys(p).unwrap())
+                .any(|keys| keys.0.get("oauth:tokenCache")
+                    == Some(&serde_json::json!("cache-third"))),
+            "the keys are set aside"
+        );
+    }
+
+    /// The strays directory can become a link between choosing where a stray goes and
+    /// moving it there.
+    #[test]
+    fn a_strays_directory_that_became_a_link_is_not_moved_into() {
+        let m = desktop_machine("strays-linked");
+        let outside = m.support().with_file_name("outside-strays");
+        std::fs::create_dir_all(&outside).unwrap();
+        let strays = paths::strays_dir(&m.ctx);
+        let linked = outside.clone();
+        let stray = m.support().join("Cookies");
+        let refused = fault::meanwhile(
+            "tree.stray_target_chosen",
+            move || {
+                let _ = std::fs::remove_dir_all(&strays);
+                std::os::unix::fs::symlink(&linked, &strays).unwrap();
+            },
+            || moves::Strays::new().set_aside(&m.ctx, &stray),
+        )
+        .expect_err("the strays directory became a link");
+        assert!(
+            matches!(refused, Error::HomeUnwritable { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was moved to where the link points"
+        );
+        assert!(m.support().join("Cookies").exists(), "the login stays");
     }
 
     #[test]

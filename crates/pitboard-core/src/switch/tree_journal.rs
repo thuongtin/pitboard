@@ -496,7 +496,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         };
         let mut strays = moves::Strays::new();
         if let Some(original) = &original {
-            keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, original)?;
+            keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, original, None)?;
         }
         crate::fault::point("tree.recovery_steps_decided");
         take(ctx, which, &bases, steps, &mut strays)?;
@@ -590,11 +590,32 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         (Operation::Switch, Some(keys)) => {
             Some(kept_keys(&keys, &journal.config_keys.to).map_err(undetermined)?)
         }
+        // A sign-out installs no keys, so what a login made since left in the config is
+        // new unless it is the outgoing account's, which its park kept.
+        (Operation::SignOut, _) => Some(ConfigKeys::default()),
         _ => None,
     };
+    let outgoing = (journal.operation == Operation::SignOut)
+        .then_some(journal.from_park.as_deref())
+        .flatten()
+        .and_then(|name| {
+            kept_keys(
+                &parks.join(name).join(CONFIG_KEYS_FILE),
+                &journal.config_keys.from,
+            )
+            .ok()
+        });
     let mut strays = moves::Strays::new();
     if let Some(incoming) = &incoming {
-        keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, incoming)?;
+        keep_keys_of_strays(
+            ctx,
+            which,
+            &mut strays,
+            &config,
+            &steps,
+            incoming,
+            outgoing.as_ref(),
+        )?;
     }
     crate::fault::point("tree.recovery_steps_decided");
     take(ctx, which, &bases, steps, &mut strays)?;
@@ -602,6 +623,8 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
 
     // The app rewrites its config as it runs, so it is asked once more, as before every move.
     tree::still_quiet(ctx, which)?;
+    // The config is written under the folder, which is looked at once more.
+    bases.iter().try_for_each(tree::Anchored::still_there)?;
     match journal.operation {
         Operation::Switch => {
             match incoming {
@@ -745,13 +768,14 @@ fn keep_keys_of_strays(
     config: &Path,
     steps: &[Step],
     incoming: &ConfigKeys,
+    outgoing: Option<&ConfigKeys>,
 ) -> Result<()> {
     if !steps.iter().any(|step| matches!(step, Step::Stray(_))) {
         return Ok(());
     }
     tree::still_quiet(ctx, which)?;
     let left = config::read_keys(config)?;
-    if !left.0.is_empty() && left != *incoming {
+    if !left.0.is_empty() && left != *incoming && Some(&left) != outgoing {
         let slot = strays.dir(ctx)?;
         tree::write_secret_json(&slot.join(CONFIG_KEYS_FILE), &left.0)?;
     }
@@ -1280,6 +1304,36 @@ mod tests {
                 "{name} where the link points is left alone"
             );
         }
+    }
+
+    /// The data folder can be replaced after the last step of a forward recovery, and the
+    /// config of whatever stands there is not Claude's.
+    #[test]
+    fn a_data_folder_that_became_a_link_after_recovery_moved_is_not_written_through() {
+        let m = desktop_machine("recovery-root-linked");
+        assert_eq!(m.crash_at("tree.installed").unwrap_err(), "tree.installed");
+        let outside = m.support().with_file_name("outside-recovery-config");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("config.json"), "{\"locale\":\"elsewhere\"}").unwrap();
+        let (support, linked) = (m.support(), outside.clone());
+        let refused = fault::meanwhile(
+            "tree.recovery_moved",
+            move || {
+                let aside = support.with_file_name("Claude-displaced-recovery");
+                std::fs::rename(&support, &aside).unwrap();
+                std::os::unix::fs::symlink(&linked, &support).unwrap();
+            },
+            || m.recover(),
+        )
+        .expect_err("the data folder became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("config.json")).unwrap(),
+            "{\"locale\":\"elsewhere\"}"
+        );
     }
 
     /// A folder deleted and made again at the same path, or a link pointed somewhere else, is

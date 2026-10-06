@@ -334,12 +334,45 @@ impl Strays {
         if std::fs::symlink_metadata(&target).is_ok() {
             target = stray_slot(ctx)?.join(&place);
         }
+        crate::fault::point("tree.stray_target_chosen");
+        refuse_linked_strays(ctx, &target)?;
         rename_durably(path, &target).map_err(|source| Error::HomeUnwritable {
             path: target.clone(),
             source,
         })?;
         Ok(target)
     }
+}
+
+/// Refuses a `target` under the strays directory that has a link on the way to it, the
+/// strays directory itself included: a rename would take the item to where the link points,
+/// outside Pitboard's home.
+fn refuse_linked_strays(ctx: &Context, target: &Path) -> Result<(), Error> {
+    let strays = strays_dir(ctx);
+    let mut walked = strays.clone();
+    let below = target.strip_prefix(&strays).unwrap_or(target);
+    let parts = std::iter::once(None).chain(
+        below
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+            .map(Some),
+    );
+    for part in parts {
+        if let Some(part) = part {
+            walked.push(part);
+        }
+        if std::fs::symlink_metadata(&walked).is_ok_and(|found| found.file_type().is_symlink()) {
+            return Err(Error::HomeUnwritable {
+                path: walked,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a folder for what is set aside is a link",
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A directory of its own under the strays directory, named for now, for one thing set
