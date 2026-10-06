@@ -339,6 +339,18 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         });
     }
     let root = journal.support_dir.clone();
+    // The same path on another volume is another folder: an inode is only the same item on
+    // one device. A volume that cannot be read now is no proof it is the same one.
+    if let Some(recorded) = journal.device
+        && ctx.host().device_of(&root).ok() != Some(recorded)
+    {
+        return Err(Error::RecoveryElsewhere {
+            tool: which,
+            from,
+            to,
+            slot: root.display().to_string(),
+        });
+    }
     if tree::quiet(ctx, which).is_err() {
         return Err(Error::RecoveryWaiting {
             tool: which,
@@ -391,6 +403,17 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         }
         let mut strays = moves::Strays::new();
         take(ctx, which, steps, &mut strays)?;
+        // The app may have rewritten its config once the items were gone, so the keys kept
+        // before the first move go back with them, unless it is as it was.
+        let kept = from_park.join(CONFIG_KEYS_FILE);
+        if kept.is_file() {
+            tree::still_quiet(ctx, which)?;
+            let config = paths::config_file(&root);
+            let original = config::read_keys(&kept)?;
+            if config::read_keys(&config)? != original {
+                config::splice(&config, &original)?;
+            }
+        }
         // What is left of the park the run began is Pitboard's own records of it, and the
         // folders the moves made. Anything else in it is set aside, never deleted.
         let _ = std::fs::remove_file(from_park.join(CONFIG_KEYS_FILE));
@@ -736,6 +759,30 @@ mod tests {
         let refused = super::super::settle(&ctx, Some(ProviderId::Desktop))
             .err()
             .expect("another data folder");
+        assert!(
+            matches!(refused, Error::RecoveryElsewhere { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(m.inodes(), during);
+        assert!(pending(&m.ctx).is_some());
+    }
+
+    /// The same path on another volume is not the folder the run moved items of: inodes mean
+    /// something only on one device, so what a path now holds is not judged by them.
+    #[test]
+    fn a_data_folder_on_another_volume_is_left_alone() {
+        let m = desktop_machine("another-volume");
+        m.mem.device(&m.support(), 7);
+        m.mem.device(&paths::parks_dir(&m.ctx), 7);
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let during = m.inodes();
+        m.mem.device(&m.support(), 8);
+        let refused = super::super::settle(&m.ctx, Some(ProviderId::Desktop))
+            .err()
+            .expect("another volume");
         assert!(
             matches!(refused, Error::RecoveryElsewhere { .. }),
             "{refused:?}"

@@ -633,11 +633,13 @@ fn held_back(held: budget::Held) -> Stale {
 /// or say why not.
 ///
 /// The budget stands only while live usage is on. Off, nothing is asked of anybody, and a
-/// floor kept from before it was turned off would only hide that.
+/// floor kept from before it was turned off would only hide that. A `parked` login is
+/// checked against its account before its session is used.
 fn ask_folder(
     ctx: &Context,
     root: &Path,
     account: &Account,
+    parked: Option<&Park>,
     remembered: Option<&Snapshot>,
     fresh: bool,
 ) -> Asked {
@@ -646,6 +648,14 @@ fn ask_folder(
         && let Some(held) = budget::may_ask(ctx, &key, remembered, fresh)
     {
         return (Err(held_back(held)), None);
+    }
+    // A parked folder is the account's own only when its manifest, keys and session say so:
+    // a reference to another account's park would stamp that account's usage on this one.
+    if let Some(park) = parked
+        && live_usage::load(ctx).enabled
+        && crate::switch::check_tree_park(ctx, &account.label, account, park).is_err()
+    {
+        return (Err(Stale::ParkUnreadable), None);
     }
     let answer = live_usage::ask(ctx, root, account);
     let outcome = match &answer {
@@ -704,6 +714,7 @@ fn ask_tree(
         ctx,
         &root,
         &account,
+        None,
         remembered.get(&account.usage_key()),
         fresh,
     );
@@ -986,6 +997,7 @@ pub fn gather(ctx: &Context, state: &State, fresh: bool) -> Report {
                             ctx,
                             root,
                             account,
+                            account.parked.as_ref(),
                             remembered.get(&account.usage_key()),
                             fresh,
                         ),
@@ -2610,6 +2622,45 @@ mod tests {
             assert_eq!(desktop.awaiting_sign_in, None);
         }
         assert_eq!(api.calls(), 0, "nobody is asked while live usage is off");
+    }
+
+    /// A parked folder is asked about only once it is shown to be the account's own park: one
+    /// whose manifest names another account would put that account's usage on this one.
+    #[test]
+    fn a_parked_folder_of_another_account_is_not_asked_about() {
+        let m = crate::switch::harness::desktop_machine("status-foreign-park");
+        let api = ScriptedApi::new();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding())
+            .with_scripted_api(Arc::clone(&api));
+        live_usage::save(
+            &ctx,
+            &LiveUsage {
+                enabled: true,
+                approval: Approval::Granted,
+                ..LiveUsage::default()
+            },
+        )
+        .unwrap();
+        let state = crate::state::load(&ctx).expect("the machine's accounts");
+        let there = state
+            .get(&m.key("there"))
+            .expect("there is enrolled")
+            .clone();
+        let park = there.parked.clone().expect("there is parked");
+        let dir = crate::provider::desktop::paths::parks_dir(&ctx).join(&park.service);
+        let manifest_file = dir.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_file).unwrap()).unwrap();
+        manifest["account_uuid"] = json!("someone-else");
+        std::fs::write(&manifest_file, manifest.to_string()).unwrap();
+
+        let (answer, learned) = ask_folder(&ctx, &dir, &there, Some(&park), None, true);
+        assert_eq!(answer.unwrap_err(), Stale::ParkUnreadable);
+        assert!(learned.is_none());
+        assert_eq!(api.calls(), 0, "nobody was asked");
     }
 
     /// A reading remembered under the app's usage key comes back with the account's own id,

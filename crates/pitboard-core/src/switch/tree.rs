@@ -323,6 +323,16 @@ pub(crate) fn check_park(
     if !dir.join(CONFIG_KEYS_FILE).is_file() {
         return Err(corrupt("the keys of its config are missing"));
     }
+    // Every item the manifest lists was in the park when it was made; one gone is a login
+    // that would be installed incomplete.
+    for item in &manifest.items {
+        let inside = Path::new(item)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+        if !inside || std::fs::symlink_metadata(dir.join(item)).is_err() {
+            return Err(corrupt("an item it holds is missing"));
+        }
+    }
     match identity::session_of(ctx, &dir)? {
         Some(session)
             if session.fingerprint == manifest.fingerprint
@@ -465,6 +475,11 @@ fn park_out(
         .map_err(unwritable(&dir))?;
     moves::fsync_dir(&parks).map_err(unwritable(&parks))?;
 
+    // The keys of the config as the account left them, kept before anything moves: the app
+    // may rewrite its config once the items are gone, and an undo puts these back.
+    let keys = config::read_keys(&paths::config_file(root))?;
+    write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys.0)?;
+
     let mut moved = Vec::new();
     for item in journal.items.iter().filter(|i| i.from_inode.is_some()) {
         // Asked again before every move: the app may have been opened since the last.
@@ -477,8 +492,6 @@ fn park_out(
     }
     fault::point("tree.live_parked");
 
-    let keys = config::read_keys(&paths::config_file(root))?;
-    write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys.0)?;
     write_secret_json(
         &dir.join(MANIFEST_FILE),
         &Manifest {
@@ -572,6 +585,8 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
                 LiveOwner::Enrolled(found) if found == *key
             )
         {
+            // Signed in as this account, so a sign-out waiting for one is over.
+            clear_awaiting(ctx);
             return Ok((
                 Outcome::AlreadyActive {
                     label: state.typed(key),
@@ -601,6 +616,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
                 state.used(key, ctx.now());
                 state::save(ctx, &state)?;
             }
+            clear_awaiting(ctx);
             if old.is_some() {
                 let pending = purge(ctx, &mut state);
                 warnings.extend((pending > 0).then_some(Warning::ParksPendingRemoval(pending)));
@@ -1362,6 +1378,29 @@ mod tests {
         assert!(expiring(&m.ctx, &state, ProviderId::Desktop).is_empty());
     }
 
+    /// An add that parked `there` is waiting for a sign-in; signing back in to `there`
+    /// directly and switching to it ends that wait, as enrolling or a completed switch does.
+    #[test]
+    fn switching_to_the_account_in_use_ends_a_sign_in_wait() {
+        let m = desktop_machine("in-use-awaiting");
+        m.there_park();
+        m.plant_live("there", "v10there");
+        write_awaiting(
+            &m.ctx,
+            &Awaiting {
+                from_label: "desktop/there".into(),
+                started_at: m.ctx.now(),
+            },
+        )
+        .unwrap();
+        let (outcome, _) = switch_to(&m, "there").expect("already in use");
+        assert!(
+            matches!(outcome, Outcome::AlreadyActive { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(awaiting_sign_in(&m.ctx), None);
+    }
+
     #[test]
     fn enrolling_the_same_label_confirms_it() {
         let m = desktop_machine("confirm");
@@ -1566,6 +1605,28 @@ mod tests {
         );
     }
 
+    /// A park that has lost an item its manifest lists would install an incomplete login, so
+    /// it is refused before anything moves.
+    #[test]
+    fn a_park_missing_an_item_its_manifest_lists_is_refused() {
+        let m = desktop_machine("missing-item");
+        let dir = paths::parks_dir(&m.ctx).join(m.there_park());
+        let manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert!(
+            manifest.items.iter().any(|i| i == "Local Storage"),
+            "{manifest:?}"
+        );
+        std::fs::remove_dir_all(dir.join("Local Storage")).unwrap();
+        let before = m.inodes();
+        let refused = switch_to(&m, "there").expect_err("an item is gone");
+        assert!(
+            matches!(refused, Error::ParkedCredentialCorrupt { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(m.inodes(), before);
+    }
+
     #[test]
     fn two_tools_with_one_uuid_keep_their_parks_apart() {
         let m = desktop_machine("two-tools");
@@ -1753,5 +1814,37 @@ mod tests {
         assert!(!recovered.finished, "undone, not finished");
         assert_eq!(m.inodes(), before, "every item is back where it was");
         assert_eq!(m.whole("here"), super::super::harness::Whole::Live);
+    }
+
+    /// Claude opened after the last item moved and rewrote its config, emptying the account's
+    /// keys: undoing the switch puts the items back, and with them the keys that were there
+    /// before, or the returned session would sit beside a token cache of nobody's.
+    #[test]
+    fn undoing_a_park_restores_the_config_keys_the_app_rewrote() {
+        let m = desktop_machine("undo-config-keys");
+        let config = paths::config_file(&m.support());
+        let original = config::read_keys(&config).unwrap();
+        assert!(!original.0.is_empty(), "the account has keys to lose");
+        let mem = std::sync::Arc::clone(&m.mem);
+        let rewritten = config.clone();
+        let refused = fault::meanwhile(
+            "tree.live_parked",
+            move || {
+                mem.runs_within(APP_PATH);
+                config::splice(&rewritten, &ConfigKeys::default()).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the app opened before the park was recorded");
+        assert!(matches!(refused, Error::AppStillOpen { .. }), "{refused:?}");
+        assert_eq!(config::read_keys(&config).unwrap(), ConfigKeys::default());
+
+        m.mem.quits_within();
+        let recovered = m
+            .recover()
+            .expect("recovered")
+            .expect("the interrupted switch was found");
+        assert!(!recovered.finished, "undone, not finished");
+        assert_eq!(config::read_keys(&config).unwrap(), original);
     }
 }

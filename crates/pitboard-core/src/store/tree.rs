@@ -40,8 +40,9 @@ pub(crate) fn moved_not_synced(error: &io::Error) -> Option<&MovedNotSynced> {
 ///
 /// Refused when anything at all is at `to`, a dangling link or an empty directory
 /// included, which a plain rename would replace without a word. A missing parent of `to`
-/// is made, private. Both parents are synced afterwards, so the move survives a power cut,
-/// and what arrived is checked to be what left.
+/// is made, private, and synced into the directory above it. Both parents are synced
+/// afterwards, so the move survives a power cut, and what arrived is checked to be what
+/// left.
 ///
 /// Every error but one means nothing moved. The one is a sync that failed after the
 /// rename, when the item is at `to`: that error carries a [`MovedNotSynced`], which
@@ -66,10 +67,27 @@ pub(crate) fn rename_durably(from: &Path, to: &Path) -> io::Result<u64> {
     // Both found before the rename, so nothing that can fail for want of them comes after.
     let from_parent = parent(from)?;
     let to_parent = parent(to)?;
+    // Each directory made for the move is an entry in the one above it, which is synced
+    // too: else a power cut could keep the rename and lose the directory it landed in.
+    let mut made = Vec::new();
+    let mut above = Some(to_parent);
+    while let Some(dir) = above {
+        match std::fs::symlink_metadata(dir) {
+            Ok(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                made.push(parent(dir)?);
+                above = dir.parent();
+            }
+            Err(e) => return Err(e),
+        }
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(to_parent)?;
+    for holder in made {
+        fsync_dir(holder)?;
+    }
     crate::host::fs::rename_exclusive(from, to)?;
     if let Err(source) = fsync_dir(from_parent).and_then(|()| fsync_dir(to_parent)) {
         return Err(io::Error::new(
@@ -193,6 +211,8 @@ pub(crate) fn fsync_dir(path: &Path) -> io::Result<()> {
     if SYNC_FAILS.with(std::cell::Cell::get) {
         return Err(io::Error::other("a sync a test made fail"));
     }
+    #[cfg(test)]
+    SYNCED.with(|synced| synced.borrow_mut().push(path.to_path_buf()));
     std::fs::File::open(path)?.sync_all()
 }
 
@@ -200,6 +220,8 @@ pub(crate) fn fsync_dir(path: &Path) -> io::Result<()> {
 thread_local! {
     /// Makes every sync on this thread fail, for a test of what follows a move.
     pub(crate) static SYNC_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Every directory synced on this thread, in order, for a test of what a move made durable.
+    pub(crate) static SYNCED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Deletes the park called `name`, and nothing else: refused unless the name is one park's
@@ -428,6 +450,36 @@ mod tests {
         assert_eq!(parent.permissions().mode() & 0o777, 0o700);
     }
 
+    /// A destination parent made for the move is an entry in the directory above it, and only
+    /// syncing that directory keeps it after a power cut: syncing the new directory alone
+    /// could keep the rename and lose the directory it landed in.
+    #[test]
+    fn the_directories_a_move_made_are_synced_into_the_ones_above() {
+        let s = scratch("sync-ancestors");
+        let from = s.0.join("IndexedDB-item");
+        std::fs::write(&from, b"rows").unwrap();
+        let parks = s.0.join("parks");
+        std::fs::create_dir_all(&parks).unwrap();
+        let to = parks.join("pitboard-tree-a-1/IndexedDB/item");
+
+        SYNCED.with(|synced| synced.borrow_mut().clear());
+        rename_durably(&from, &to).unwrap();
+        let synced = SYNCED.with(|synced| synced.borrow().clone());
+
+        for dir in [
+            &parks,
+            &parks.join("pitboard-tree-a-1"),
+            &parks.join("pitboard-tree-a-1/IndexedDB"),
+            &s.0,
+        ] {
+            assert!(
+                synced.contains(dir),
+                "{} was not synced: {synced:?}",
+                dir.display()
+            );
+        }
+    }
+
     /// Once the rename is done the item is at `to`, whatever then fails: a sync that fails
     /// afterwards says so, and says what moved, rather than reading as a move not made.
     #[test]
@@ -437,6 +489,8 @@ mod tests {
         std::fs::write(&from, b"jar").unwrap();
         let before = inode(&from).unwrap().expect("there");
         let to = s.0.join("parks/pitboard-tree-a-1/Cookies");
+        // The parent is there already, so the only syncs are those after the rename.
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
 
         SYNC_FAILS.with(|fails| fails.set(true));
         let err = rename_durably(&from, &to).unwrap_err();
