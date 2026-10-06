@@ -630,8 +630,10 @@ fn remove_empty(dir: &Path) {
 /// was written, and recovery would refuse it for ever.
 pub(super) fn abandon(ctx: &Context, state: &mut State) -> Result<Option<Abandoned>> {
     let path = path(ctx);
-    if std::fs::symlink_metadata(&path).is_err() {
-        return Ok(None);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(Error::RecoveryFailed { path, source }),
     }
     let Ok(Some(journal)) = read(ctx) else {
         clear(ctx)?;
@@ -937,6 +939,24 @@ mod tests {
             matches!(refused, Error::RecoveryFailed { .. }),
             "{refused:?}"
         );
+    }
+
+    /// A record that cannot be looked up is not a record that is not there: abandoning says
+    /// so, rather than reporting nothing to abandon while the record goes on blocking.
+    #[test]
+    fn abandoning_a_record_that_cannot_be_looked_up_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let m = desktop_machine("abandon-lookup-fails");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let home = paths::desktop_home(&m.ctx);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = super::super::abandon(&m.ctx);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        refused.expect_err("the record could not be looked up");
+        assert!(path(&m.ctx).is_file(), "the record is still there");
     }
 
     #[test]
