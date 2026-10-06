@@ -85,7 +85,7 @@ For each exit status, see [Exit codes](/reference/commands#exit-codes). In the t
 | `state_names_unknown_tool` | 1 | The account list has an account for a tool this Pitboard does not know, so a newer Pitboard wrote it. | [Update Pitboard](/install#update-pitboard). |
 | `state_wrong_machine` | 1 | The account list was written on another computer, so Pitboard does not use it. Only `pitboard adopt` takes it over. | Run `pitboard adopt`, then sign in to each account again. See [Recover after a crash, a restore or a move](/troubleshooting/recovery#the-pitboard-directory-came-from-another-computer). |
 | `state_write_failed` | 1 | Pitboard could not save its account list. | Check that you can write to the file the message names. |
-| `home_unwritable` | 1 | Pitboard could not write to its directory, a lock file in it, the record of a switch before it starts, or the renewal schedule's files. | Check that you can write to the path the message names. |
+| `home_unwritable` | 1 | Pitboard could not write to its directory, a lock file in it, a switch's record before it starts, or the renewal schedule's files. | Check that you can write to the path the message names. |
 
 ## Claude Code and Codex files
 
@@ -191,7 +191,7 @@ A warning does not stop the command. The Pitboard window shows it in the notice 
 | `switch_unfinished` | **A Claude Desktop switch stopped partway** | A Claude Desktop switch failed after it had started moving files, and Pitboard kept its record. Keep Claude closed: the next change finishes or undoes it first. |
 | `park_expires_soon` | **A Claude Desktop sign-in lapses soon** | A parked Claude Desktop login lapses within 7 days, and Pitboard cannot renew it. Switch to that account before the date the message gives. |
 | `strays_kept` | **Claude Desktop files were set aside** | Items in Claude's data folder belonged to neither account, so Pitboard set them aside in `~/.pitboard/desktop/strays` rather than delete them. |
-| `replaced_outside_pitboard` | **Claude was signed in outside Pitboard** | Claude Desktop was signed in to another account outside Pitboard, and the account recorded in use had no parked login to keep, so it is no longer recorded in use. Enrol it again to switch back to it. |
+| `replaced_outside_pitboard` | **Claude was signed in outside Pitboard** | Claude Desktop was signed in to another account outside Pitboard. The account recorded in use had no parked login to keep, so it is no longer recorded in use. Enrol it again to switch back to it. |
 | An error code, such as `config_write_failed` or `renewal_failed` | **Pitboard has a warning** | That error happened without stopping the command. See the code's row earlier. |
 
 `twin_not_enrolled` appears only after `pitboard use --both`. The other Claude app has no account enrolled for the same claude.ai account. Pitboard therefore switched only the one you named. Enrol the account in the other app to switch both.

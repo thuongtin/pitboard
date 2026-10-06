@@ -101,7 +101,7 @@ Pitboard colours output that goes to a terminal, unless `NO_COLOR` is set and no
 | `0` | The command did what was asked. |
 | `1` | A request could not be met, for example because the label is unknown or a service did not answer. |
 | `2` | The command line was wrong: an unknown option, a missing argument, or a label for `pitboard enroll`, or the second label of `pitboard rename`, that breaks the label rules. |
-| `3` | A login or a tool's files are in a state Pitboard will not act on, for example Codex signed in with an API key, or Claude Desktop still open. `pitboard doctor` also exits 3 when a check fails. |
+| `3` | A login or a tool's files are in a state Pitboard will not act on. Examples are Codex signed in with an API key and Claude Desktop still open. `pitboard doctor` also exits 3 when a check fails. |
 
 Declining the question from `pitboard forget` or `pitboard uninstall` prints nothing more, changes nothing and exits 0.
 
