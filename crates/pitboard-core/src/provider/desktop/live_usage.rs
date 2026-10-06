@@ -439,6 +439,22 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
     crate::fault::point("live_usage.password_read");
     match ctx.safe_storage().password(ctx, KeyRead::Refresh) {
         Ok(password) => {
+            // The item can be replaced while the read waits: what came back may belong to a
+            // version that was never allowed, so it is kept only under a stamp read after it.
+            match ctx.safe_storage().stamp(ctx) {
+                Ok(after) if after == stamp => {}
+                Ok(_) => {
+                    return Err(needs_approval(
+                        ctx,
+                        &held,
+                        state.stamp.as_ref(),
+                        None,
+                        "item_changed",
+                    ));
+                }
+                Err(KeyReadError::NoGui) => return Err(Stale::LiveUsageNeedsGui),
+                Err(_) => return Err(Stale::LoginUnreadable),
+            }
             let key = crypto::derive_key(&password);
             keep(ctx, stamp.clone(), key.clone());
             Ok((stamp, key))
@@ -1190,6 +1206,30 @@ mod tests {
         assert_eq!(refused.err(), Some(Stale::Interrupted));
         let state = load(&d.ctx);
         assert_eq!(state.approval, Approval::Granted, "{state:?}");
+    }
+
+    /// A refresh whose password read waits while Claude replaces the item must not keep what
+    /// came back: it may be a key nobody allowed, so it asks again instead.
+    #[test]
+    fn a_key_read_while_the_item_was_replaced_is_not_kept() {
+        let d = desk("replaced-mid-read", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        forget_key(&d.ctx);
+        let keychain = Arc::clone(&d.keychain);
+        let refused = crate::fault::meanwhile(
+            "live_usage.password_read",
+            move || {
+                keychain
+                    .now_holding("the new key")
+                    .changed_at("20261001120000Z");
+            },
+            || key(&d.ctx),
+        );
+        assert_eq!(refused.err(), Some(Stale::LiveUsageNeedsApproval));
+        assert!(cached(&d.ctx).is_none(), "the new key is not kept");
+        let state = load(&d.ctx);
+        assert_eq!(state.approval, Approval::NeedsApproval, "{state:?}");
+        assert_eq!(state.reason.as_deref(), Some("item_changed"));
     }
 
     /// A request to turn live usage on that macOS refuses, while another request saved the
