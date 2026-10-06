@@ -786,12 +786,21 @@ impl Pitboard {
         tool: Option<ProviderId>,
         run: impl FnOnce(Settled) -> Result<(T, Vec<Warning>)>,
     ) -> Changing<T> {
-        let (settled, recovered) = switch::settle(&self.ctx, tool).map_err(|error| {
+        let (settled, recovered) = switch::settle(&self.ctx, tool).map_err(|mut error| {
             audit::record(&self.ctx, verb, subject, error.code());
-            Failed {
+            let mut warnings = error.take_warnings();
+            // A record settling could not clear says the switch is unfinished, as a run
+            // that failed partway does. Refusals that already say a run is waiting, or
+            // that the app opened midway, say all the warning would.
+            if !matches!(
                 error,
-                warnings: Vec::new(),
+                Error::RecoveryWaiting { .. }
+                    | Error::RecoveryElsewhere { .. }
+                    | Error::AppStillOpen { midway: true, .. }
+            ) {
+                warnings.extend(switch::tree_unfinished(&self.ctx));
             }
+            Failed { error, warnings }
         })?;
         let mut warnings = Vec::new();
         // Read from files as well as from this process's environment, so the app, which
@@ -1253,6 +1262,42 @@ mod tests {
                 .all(|w| w.code() != "switch_unfinished"),
             "{:?}",
             opened.warnings
+        );
+    }
+
+    /// A switch that cannot first settle an earlier one leaves that one's record, and says
+    /// so as a failure partway says it: whoever quit Claude for the change keeps it closed,
+    /// whatever the settling failed on.
+    #[test]
+    fn a_switch_that_cannot_settle_an_earlier_one_says_it_is_unfinished() {
+        use crate::switch::harness::desktop_machine;
+        use std::os::unix::fs::PermissionsExt;
+        let m = desktop_machine("service-unsettled");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let support = m.support();
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o500))
+            .expect("lock the data folder");
+        let pitboard = Pitboard::new(m.ctx.clone());
+        let failed = pitboard
+            .switch_to("desktop/there")
+            .expect_err("the earlier switch cannot be undone");
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock the data folder");
+        assert_eq!(failed.error.code(), "desktop_data_inaccessible");
+        assert!(
+            switch::tree_interrupted(&m.ctx).is_some(),
+            "the record is kept"
+        );
+        assert!(
+            failed
+                .warnings
+                .iter()
+                .any(|w| w.code() == "switch_unfinished"),
+            "{:?}",
+            failed.warnings
         );
     }
 

@@ -216,6 +216,9 @@ pub struct Context {
 fn desktop_app(named: Option<PathBuf>) -> (Option<PathBuf>, Option<PathBuf>) {
     let app = named
         .filter(|named| !named.as_os_str().is_empty())
+        // Absolute, since a running Claude reports its bundle that way. One that cannot be
+        // made absolute is left as it was said.
+        .map(|named| std::path::absolute(&named).unwrap_or(named))
         .or_else(|| crate::host::OS.claude_desktop_app().map(PathBuf::from));
     let program = app
         .as_deref()
@@ -665,6 +668,17 @@ mod tests {
             .with_desktop_app(String::new());
         assert_eq!(unset.desktop_dir, None, "empty means unset");
         assert_eq!(unset.desktop_app, own, "empty means unset");
+    }
+
+    /// The process scan compares the bundle with the absolute paths a running Claude reports,
+    /// so a bundle said relatively is read from the root, or Claude would look closed.
+    #[test]
+    fn a_relative_desktop_bundle_is_read_from_the_root() {
+        let ctx =
+            Context::new(PathBuf::from("/home/x")).with_desktop_app("scratch/Claude.app".into());
+        let app = ctx.desktop_app.expect("a bundle");
+        assert!(app.is_absolute(), "{app:?}");
+        assert!(app.ends_with("scratch/Claude.app"), "{app:?}");
     }
 
     /// The command line reads Claude Desktop's two variables the way the app is given them,
