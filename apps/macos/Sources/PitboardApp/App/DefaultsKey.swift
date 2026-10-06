@@ -12,4 +12,11 @@ enum DefaultsKey {
     /// The page each account window was last on, by the Pitboard directory's path and the
     /// window's store.
     static let windowPages = "windowPages"
+    /// Whether the notification that macOS stopped Pitboard reading Claude's key has been
+    /// sent since live usage last worked, so it is sent once and not at every read, and not
+    /// again by an app opened anew.
+    static let liveUsagePauseTold = "liveUsagePauseTold"
+    /// Whether choosing an account in Claude Code or Claude Desktop switches the other to the
+    /// same claude.ai account too. Off unless somebody turns it on.
+    static let switchClaudeTogether = "switchClaudeTogether"
 }

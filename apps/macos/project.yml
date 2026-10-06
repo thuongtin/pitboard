@@ -119,10 +119,12 @@ targets:
     platform: macOS
     sources:
       - path: App
+        excludes: [Pitboard.entitlements]
     settings:
       groups: [signing, version]
       base:
         INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Pitboard.entitlements
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_PREVIEWS: YES
         COMBINE_HIDPI_IMAGES: YES

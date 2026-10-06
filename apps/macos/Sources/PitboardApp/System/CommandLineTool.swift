@@ -18,16 +18,24 @@ struct CommandLineTool: Sendable {
     /// Where the link goes: `/usr/local/bin/pitboard` unless a test says otherwise, on the
     /// `PATH` macOS gives every shell and in a directory only an administrator can write to.
     let link: String
+    /// Nonsecret paths the helper needs to read the same Desktop state as this app.
+    let codeEnvironment: [String: String]
     /// A test hands in its own, so nothing it does waits on a password prompt.
     private let execute: Runner
 
     /// Runs an AppleScript and hands back the error it raised, or nil.
     typealias Runner = @Sendable (String) -> NSDictionary?
 
-    init(helper: String?, installPlaces: [String], link: String, execute: @escaping Runner) {
+    init(
+        helper: String?, installPlaces: [String], link: String,
+        codeEnvironment: [String: String] = [:], execute: @escaping Runner
+    ) {
         self.helper = helper
         self.installPlaces = installPlaces
         self.link = link
+        self.codeEnvironment = codeEnvironment.filter {
+            Self.codeEnvironmentKeys.contains($0.key)
+        }
         self.execute = execute
     }
 
@@ -35,13 +43,40 @@ struct CommandLineTool: Sendable {
     /// core reads from this app's environment unless a test says otherwise.
     init(
         bundle: URL = Bundle.main.bundleURL,
-        home: String = homeDirectory(environment: ProcessInfo.processInfo.environment),
+        home: String? = nil,
         link: String = "/usr/local/bin/pitboard",
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         execute: @escaping Runner = CommandLineTool.execute(script:)
     ) {
+        // An empty `HOME` is a path too, to the core: this process's own directory. A relative
+        // one is read from there as well, and Terminal starts the helper somewhere else.
+        let given = home ?? homeDirectory(environment: environment)
+        let home = Self.fromWorkingDirectory(
+            given.isEmpty ? FileManager.default.currentDirectoryPath : given)
+        var codeEnvironment = [
+            "HOME": home,
+            "PITBOARD_HOME": environment["PITBOARD_HOME"].map {
+                // Empty is a path too, to the core: this process's own directory.
+                Self.fromWorkingDirectory($0.isEmpty ? FileManager.default.currentDirectoryPath : $0)
+            } ?? "\(home)/.pitboard",
+            "PITBOARD_CLAUDE_DESKTOP_DIR": environment["PITBOARD_CLAUDE_DESKTOP_DIR"]
+                .map(Self.fromWorkingDirectory) ?? "\(home)/Library/Application Support/Claude",
+        ]
+        // A bare name is looked up on the path, wherever it runs; one with a directory in it
+        // is relative to this process.
+        codeEnvironment["PITBOARD_CLAUDE"] = environment["PITBOARD_CLAUDE"].map {
+            $0.contains("/") ? Self.fromWorkingDirectory($0) : $0
+        }
         self.init(
             helper: Settings.bundledCommandLine(in: bundle),
-            installPlaces: commandLinePlaces(home: home), link: link, execute: execute)
+            installPlaces: commandLinePlaces(home: home), link: link,
+            codeEnvironment: codeEnvironment, execute: execute)
+    }
+
+    /// A relative path as this app's core reads it, from this process's working directory.
+    /// Terminal starts the helper somewhere else, so it is handed the absolute one.
+    private static func fromWorkingDirectory(_ path: String) -> String {
+        path.isEmpty || path.hasPrefix("/") ? path : URL(fileURLWithPath: path).path
     }
 
     /// The first `pitboard` found.
@@ -97,10 +132,51 @@ struct CommandLineTool: Sendable {
         if let type, type as? FileAttributeType != .typeSymbolicLink {
             return .failed("\(link) is already there and is not a link, so it was kept.")
         }
-        let (source, execute) = (Self.script(linking: helper, at: link), execute)
-        return await Task.detached(priority: .userInitiated) {
-            Self.outcome(of: execute(source))
-        }.value
+        return await Self.run(Self.script(linking: helper, at: link), with: execute)
+    }
+
+    /// Opens Code through this app's helper. Terminal receives a label and nonsecret paths;
+    /// the helper reads and validates the Desktop login without handing it back to the app.
+    func openDesktopCode(label: String) async -> Linked {
+        guard let helper, canRun(path: helper) else {
+            return .failed(
+                "This copy of Pitboard cannot open Claude Code with the command line inside it."
+            )
+        }
+        return await Self.run(
+            Self.script(openingDesktopCode: helper, label: label, environment: codeEnvironment),
+            with: execute)
+    }
+
+    /// `NSAppleScript` work off the main thread has to be serialized: two runs at once can
+    /// race or fail, so every script goes through this one queue, one after the other.
+    private static let scriptQueue = DispatchQueue(
+        label: "com.usepitboard.Pitboard.applescript", qos: .userInitiated)
+
+    private static func run(_ source: String, with execute: @escaping Runner) async -> Linked {
+        await withCheckedContinuation { continuation in
+            scriptQueue.async {
+                continuation.resume(returning: Self.outcome(of: execute(source)))
+            }
+        }
+    }
+
+    private static let codeEnvironmentKeys = [
+        "HOME", "PITBOARD_HOME", "PITBOARD_CLAUDE_DESKTOP_DIR", "PITBOARD_CLAUDE",
+    ]
+
+    /// Terminal runs the bundled helper with shell-quoted arguments, never a login token.
+    static func script(
+        openingDesktopCode helper: String, label: String, environment: [String: String] = [:]
+    ) -> String {
+        let assignments = codeEnvironmentKeys.compactMap { key in
+            environment[key].map { "quoted form of \(literal("\(key)=\($0)")) & \" \" & " }
+        }.joined()
+        return "tell application \"Terminal\"\n"
+            + "    do script \"/usr/bin/env \" & \(assignments)"
+            + "quoted form of \(literal(helper)) & \" desktop code -- \" & "
+            + "quoted form of \(literal(label))\n"
+            + "    activate\nend tell"
     }
 
     /// The script that runs `command` as an administrator. macOS asks for the password in

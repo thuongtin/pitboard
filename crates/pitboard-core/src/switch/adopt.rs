@@ -19,7 +19,7 @@
 //! two machines, whether an exchange invalidates the copy the other machine holds, there is
 //! no safe probe and the honest default is to drop the login and say so.
 
-use super::{exclusive, purge};
+use super::{exclusive, purge, tree, tree_journal};
 use crate::context::Context;
 use crate::error::Result;
 use crate::{audit, state};
@@ -61,6 +61,11 @@ pub fn adopt(ctx: &Context) -> Result<Option<Adopted>> {
     }
     state.active.clear();
     state.slot.clear();
+    // What the other Mac was in the middle of, and what it waited for, belongs to its
+    // volumes and its parks, which did not come across. Left here, a switch record would
+    // make every Claude Desktop change refuse as recovery for another volume.
+    tree_journal::abandon(ctx, &mut state)?;
+    tree::clear_awaiting(ctx)?;
     state.machine = state::machine_id();
     state::save(ctx, &state)?;
     purge(ctx, &mut state);

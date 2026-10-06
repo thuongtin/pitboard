@@ -31,6 +31,11 @@ public final class AppModel {
     /// How long an app has to quit once asked. Long enough for one that asks about work in
     /// progress to be answered; past it, nothing has changed and the switch is not made.
     var quitWithin: Duration = .seconds(30)
+    /// How long what an app leaves running has to go once the app has quit, and how often
+    /// to look. Claude's helpers outlive it for a moment, and the core touches none of
+    /// Claude's files while any of them runs.
+    var closeWithin: Duration = .seconds(5)
+    var closeCheckEvery: Duration = .milliseconds(200)
     private(set) var updatedAt: Date?
     /// Whether a read is running, so the refresh buttons can say so. Reads overlap, a timer's
     /// with one somebody asked for, so they are counted rather than flagged: the first to end
@@ -58,6 +63,26 @@ public final class AppModel {
     private(set) var stuck = false
     /// What giving up on an interrupted switch kept, until somebody has read it.
     private(set) var abandoned: Abandoned?
+    /// A Claude Desktop account being added: the account that was in use is parked and
+    /// Claude left signed out, waiting for somebody to sign in to another account in it.
+    /// Kept by the core, so an app that quit halfway finds it again.
+    private(set) var desktopAwaiting: Awaiting?
+    /// Whether Claude was left closed for that sign-in: it was not open when the account was
+    /// put aside, so Pitboard did not open it again, and somebody has to.
+    private(set) var claudeLeftClosed = false
+    /// Whether Claude Desktop's numbers are asked of claude.ai, and whether macOS still
+    /// lets Pitboard read the key that takes. Nil until the first read.
+    private(set) var liveUsage: LiveUsageState?
+    /// The add waiting when the sheet for it was last up, so a read shows it once and not
+    /// after every read somebody closed it after. An add this app started is kept here as
+    /// it starts: its sheet is already up.
+    private var resumedAwaiting: Int64?
+    /// Whether Claude Desktop has been read since the app opened. Only that first read puts
+    /// up the sheet for an add left halfway, the one this app was quit in the middle of. An
+    /// add a later read finds was started somewhere else, a terminal maybe with nobody at
+    /// the screen, and the window does not come forward for it uninvited: the menu and a
+    /// notice offer to finish it.
+    private var desktopReadSinceLaunch = false
 
     /// The sheet over the main window, when one is asked for.
     var sheet: AccountSheet? {
@@ -117,12 +142,16 @@ public final class AppModel {
         var restart: Restart?
         /// What a change that was not a switch said it did.
         var said: String?
+        /// The app to open for the switch to take, for a tool that reads its login as it
+        /// starts and was not running to be opened again.
+        var opens: String?
         var warnings: [Warning] = []
 
         /// What a switch means for a tool's running sessions, said only when the core did
         /// not count them. When it did, its own warning says the same with the count and
         /// with what not to do in them, and the same fact twice is once too many.
         var notice: String? {
+            if let opens { return "Open \(opens) to use \(split(to).label)." }
             guard let restart,
                 !warnings.contains(where: { $0.code == "sessions_still_running" })
             else { return nil }
@@ -137,6 +166,9 @@ public final class AppModel {
         /// The app, as the core names it from what it runs.
         let bundleID: String
         let name: String
+        /// The other Claude app's account to switch to once this one is made, when both are
+        /// switched together: kept here, since the answer to the question comes later.
+        var twin: String? = nil
     }
 
     /// The account a switch is running for, or waiting on an answer about quitting an app
@@ -223,6 +255,7 @@ public final class AppModel {
         notifier.onSwitch = { [weak self] label in
             Task { await self?.switchAsked(to: label) }
         }
+        notifier.onLiveUsage = { [weak self] in self?.liveUsageAsked() }
         machine.renewed = { [weak self] in await self?.refresh(asked: true) }
         guard watching else { return }
         // Once per launch: after that the schedule runs a command line, or was never the
@@ -269,6 +302,8 @@ public final class AppModel {
         func noticeOtherChangesForTesting() async { await noticeOtherChanges() }
         /// What has been told about, for a test that must see a run-out told once.
         var toldForTesting: [String: Int64] { notifier.told }
+        /// How often live usage was said to be paused, for a test that must see it once.
+        var liveUsagePausedToldForTesting: Int { notifier.liveUsagePausedTold }
     #endif
 
     // MARK: - Reading
@@ -295,6 +330,9 @@ public final class AppModel {
         let changedBefore = await service.changedAt()
         do {
             let read = try await service.status(fresh: asked)
+            // After the read, which is when the core reads Claude's key and can find macOS
+            // no longer lets it: read before, that is said one read late.
+            await readDesktop()
             guard changesSeen == started else { return }
             status = read
             forgetSwitchesUndone(by: read)
@@ -308,6 +346,7 @@ public final class AppModel {
             advise(from: read)
             afterRead?(read)
         } catch {
+            await readDesktop()
             guard changesSeen == started else { return }
             problem = Self.saying(error)
             problemCode = Self.code(of: error)
@@ -351,6 +390,7 @@ public final class AppModel {
         lastChangedAt = changed
         if seen != changed {
             changesSeen += 1
+            await readDesktop()
             guard let read = try? await service.statusOffline() else { return }
             status = read
             lastReadingsAt = measured
@@ -373,6 +413,7 @@ public final class AppModel {
     /// read, seconds after it was said once numbers moved with every session's response,
     /// with the account still out. Still one per tool, the newer first.
     private func advise(from read: Status) {
+        notifier.rearm(from: read)
         let new = Advice.about(read, tools: tools, unless: notifier.told)
         new.forEach(notifier.tell)
         let standing = new + advice.compactMap { $0.renewed(in: read, tools: tools) }
@@ -399,9 +440,15 @@ public final class AppModel {
     /// Puts `sheet` over the main window, opening it first on the accounts it is about. A
     /// sign-in that is running keeps its sheet: replacing it would leave the tool's sign-in
     /// running with nothing on screen to finish or stop it.
+    ///
+    /// Claude left closed by an add is looked at again: somebody may have opened it since,
+    /// and the sheet would offer to open it.
     func present(_ sheet: AccountSheet) {
         if signingIn == nil {
             self.sheet = sheet
+        }
+        if claudeLeftClosed, appControl.running(Self.claudeApp.bundleID) != nil {
+            claudeLeftClosed = false
         }
         showWindow(.accounts)
     }
@@ -419,7 +466,12 @@ public final class AppModel {
     /// Where an app runs the tool with its login in memory, as ChatGPT runs Codex, the switch
     /// waits for the person to let Pitboard quit it first: switched under it, the app would go
     /// on with the account left behind, and its own sign-out would revoke the login Pitboard
-    /// has just parked.
+    /// has just parked. Claude Desktop, the app whose accounts are switched, is quit the way
+    /// Command-Q quits it without being asked about first.
+    ///
+    /// Asked to switch both Claude apps together, a switch that worked is followed by one of
+    /// the other app to the same claude.ai account, where it has that account and is not
+    /// signed in to it already.
     func switchAsked(to qualified: String) async {
         // One switch at a time: the second would wait behind the first anyway, and its
         // choice was made from a menu that did not yet show the first. A question waiting
@@ -430,24 +482,82 @@ public final class AppModel {
         }
         // Claimed before anything is awaited, so a second request made meanwhile waits too.
         switching = qualified
-        if let app = await appHolding(split(qualified).provider) {
-            switching = nil
-            quitting = QuitToSwitch(
-                qualified: qualified, bundleID: app.bundleID, name: app.name)
-            showWindow(.accounts)
-            return
+        // Found in what the menu showed when the choice was made: the read after the first
+        // switch can wait on the network.
+        let twin =
+            defaults.bool(forKey: DefaultsKey.switchClaudeTogether)
+            ? Self.twin(of: qualified, in: status?.accounts ?? []) : nil
+        guard await switchOne(qualified, twin: twin), let twin else { return }
+        // Claimed again before anything is awaited, as the first was.
+        switching = twin
+        await switchOne(twin)
+    }
+
+    /// The same claude.ai account in the other Claude app, by its uuid, which Claude Code and
+    /// Claude Desktop share for one account whatever each calls it: where it is enrolled
+    /// there and not signed in to already. Codex signs in to OpenAI and has none.
+    nonisolated static func twin(of qualified: String, in accounts: [Account]) -> String? {
+        let (provider, label) = split(qualified)
+        let other: String
+        switch provider {
+        case defaultProvider: other = desktopProvider
+        case desktopProvider: other = defaultProvider
+        default: return nil
         }
-        present(await use(qualified))
+        let chosen = accounts.first { $0.provider == provider && $0.label == label }
+        guard let chosen, !chosen.accountUuid.isEmpty else { return nil }
+        return accounts.first {
+            $0.provider == other && $0.accountUuid == chosen.accountUuid && !$0.signedIn
+        }?.qualified
+    }
+
+    /// One switch of `switchAsked`, with any failure said in the window. Whether it was
+    /// made: not when it failed, or waits on a question about quitting an app.
+    @discardableResult
+    private func switchOne(_ qualified: String, twin: String? = nil) async -> Bool {
+        if let app = await appHolding(split(qualified).provider) {
+            var pending = QuitToSwitch(
+                qualified: qualified, bundleID: app.bundleID, name: app.name)
+            // Claude is the app being switched, so choosing one of its accounts is the
+            // request to restart it, as adding one is. A question waited in the window,
+            // which Claude in front hid, while the menu said "Switching…" for good.
+            if split(qualified).provider == desktopProvider {
+                return await quitAndSwitch(pending)
+            }
+            // The question is answered later, by which time this call has returned: what
+            // follows the switch goes with it, or only one of the two apps would switch.
+            pending.twin = twin
+            switching = nil
+            quitting = pending
+            showWindow(.accounts)
+            return false
+        }
+        let failure = await use(qualified)
+        present(failure)
+        return failure == nil
     }
 
     /// Quits the app, switches, and opens the same copy of the app again: Pitboard closed it,
     /// so Pitboard opens it, whether or not the switch worked, leaving the person where they
-    /// were. An app that is already gone is not opened. One that does not quit, because it
-    /// was busy or its person said no, stops everything before anything has changed.
+    /// were, unless the switch stopped partway. An app that is already gone is not opened.
+    /// One that does not quit, because it was busy or its person said no, stops everything
+    /// before anything has changed.
     ///
     /// Takes the switch it was asked about rather than reading `quitting`: the alert that
-    /// asks is gone, and has said so, before this runs.
-    func quitAndSwitch(_ pending: QuitToSwitch) async {
+    /// asks is gone, and has said so, before this runs. Says whether the switch was made, and
+    /// when it was, goes on to the twin the question was holding back, as `switchAsked` does.
+    @discardableResult
+    func quitAndSwitch(_ pending: QuitToSwitch) async -> Bool {
+        guard await quitAndSwitchOne(pending) else { return false }
+        if let twin = pending.twin {
+            // Claimed again before anything is awaited, as `switchAsked` does.
+            switching = twin
+            await switchOne(twin)
+        }
+        return true
+    }
+
+    private func quitAndSwitchOne(_ pending: QuitToSwitch) async -> Bool {
         quitting = nil
         switching = pending.qualified
         defer { switching = nil }
@@ -458,16 +568,60 @@ public final class AppModel {
                     "Couldn’t switch to \(split(pending.qualified).label)",
                     message: "\(pending.name) is still open, so nothing has changed. Quit it, "
                         + "then switch again."))
+            return false
         case .notRunning:
-            present(await use(pending.qualified))
+            let failure = await use(pending.qualified)
+            present(failure)
+            return failure == nil
         case .quit(let copy):
+            if split(pending.qualified).provider == desktopProvider,
+                !(await closed(pending.bundleID, of: desktopProvider))
+            {
+                appControl.open(copy, inFront: false)
+                present(
+                    Self.stillClosing(
+                        "Couldn’t switch to \(split(pending.qualified).label)", pending.name))
+                return false
+            }
             // Opened as soon as the switch is made, not after the read that follows it,
             // which can wait on the network.
-            let failure = await switchWithoutReading(to: pending.qualified)
-            appControl.open(copy)
+            let failure = await switchWithoutReading(to: pending.qualified, reopening: true)
+            // Claude, quit without a question, comes back in front, where it was, once
+            // there is nothing to say; a failure stays in front of it.
+            let inFront = failure == nil && split(pending.qualified).provider == desktopProvider
+            if !Self.leftUnfinished(failure) { appControl.open(copy, inFront: inFront) }
             if failure == nil { await refresh() }
             present(failure)
+            return failure == nil
         }
+    }
+
+    /// Whether everything that runs from the app `bundleID` and holds `provider`'s login has
+    /// gone, looked at until it has or `closeWithin` passes. Only asked once Pitboard has
+    /// quit the app: its helpers can outlive it for a moment, and Claude Desktop's files are
+    /// not touched while any runs.
+    private func closed(_ bundleID: String, of provider: String) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: closeWithin)
+        while true {
+            let held = await service.holding(provider).contains { held in
+                if case .reopenApp(let id, _) = held.remedy { return id == bundleID }
+                return false
+            }
+            guard held else { return true }
+            guard clock.now < deadline else { return false }
+            try? await Task.sleep(for: closeCheckEvery)
+        }
+    }
+
+    /// An app that quit but left something of itself running past `closeWithin`. Nothing
+    /// has changed, and the app is opened again: Pitboard quit it.
+    nonisolated static func stillClosing(_ title: String, _ name: String) -> ActionFailure {
+        ActionFailure(
+            title,
+            message: "\(name) took too long to finish closing, so nothing has changed. Try "
+                + "again in a moment.",
+            code: "app_still_open")
     }
 
     /// The question about quitting an app is gone: answered, or cancelled. An answer to quit
@@ -545,6 +699,7 @@ public final class AppModel {
         switch sheet {
         case .add(let code): code ?? addable.first?.code ?? defaultProvider
         case .signInAgain(let code, _), .name(let code, _), .rename(let code, _): code
+        case .liveUsage: desktopProvider
         }
     }
 
@@ -559,7 +714,7 @@ public final class AppModel {
     /// An account named where nothing around it says which tool it is for: its label, and
     /// once more than one tool is shown, its tool.
     func name(of account: Account) -> String {
-        let label = account.label ?? account.email
+        let label = accountName(label: account.label, email: account.email)
         guard showsTools else { return label }
         return "\(label) (\(tool(account.provider)?.name ?? account.provider))"
     }
@@ -582,6 +737,13 @@ public final class AppModel {
     /// looks: naming it would enrol something that can never be switched to.
     var unnamed: [Account] {
         status?.accounts.filter { $0.signedIn && $0.label == nil && !$0.unplaced } ?? []
+    }
+
+    /// The Claude Desktop login signed in now that is not enrolled, when no add is waiting
+    /// for a sign-in. The first Desktop account has to be named before it can be put aside
+    /// for another; an add under way is the case where the login signed in is the new one.
+    var unnamedDesktopLogin: Account? {
+        desktopAwaiting == nil ? unnamed.first { $0.provider == desktopProvider } : nil
     }
 
     /// A login signed in now that is not enrolled, in any tool.
@@ -749,13 +911,17 @@ extension AppModel {
     func use(_ qualified: String) async -> ActionFailure? {
         switching = qualified
         defer { switching = nil }
-        let failure = await switchWithoutReading(to: qualified)
+        let failure = await switchWithoutReading(to: qualified, reopening: false)
         if failure == nil { await refresh() }
         return failure
     }
 
-    /// The switch itself, and what it says, without the read that follows it.
-    private func switchWithoutReading(to qualified: String) async -> ActionFailure? {
+    /// The switch itself, and what it says, without the read that follows it. `reopening`
+    /// says Pitboard quit the tool's app for it and opens it again, so there is nothing to
+    /// tell anybody to open.
+    private func switchWithoutReading(
+        to qualified: String, reopening: Bool
+    ) async -> ActionFailure? {
         do {
             let done = try await service.switchTo(qualified)
             changesSeen += 1
@@ -767,6 +933,11 @@ extension AppModel {
                     said.adopted = Date().addingTimeInterval(TimeInterval(within))
                 case .restart(let program):
                     said.restart = Restart(program: program, from: split(from).label)
+                case .nextLaunch(let program):
+                    // Claude Desktop reads its sign-in as it starts. Quit for the switch, it
+                    // is opened again on the new account and there is nothing to say; not
+                    // running, it has to be opened for the switch to mean anything.
+                    said.opens = reopening ? nil : program
                 }
                 remember(said)
             case .alreadyActive(let label):
@@ -788,8 +959,11 @@ extension AppModel {
             return nil
         } catch {
             // Nothing moved here either, so what the last switch said stands.
-            let failure = ActionFailure(
-                "Couldn’t switch to \(split(qualified).label)", error: error)
+            let title = "Couldn’t switch to \(split(qualified).label)"
+            let failure =
+                split(qualified).provider == desktopProvider
+                ? Self.desktopFailure(title, error)
+                : ActionFailure(title, error: error)
             keep(failure)
             return failure
         }
@@ -801,6 +975,7 @@ extension AppModel {
     /// if it is still the sheet showing.
     @discardableResult
     func enrol(_ name: String, for provider: String) async -> ActionFailure? {
+        if provider == desktopProvider { return await enrolDesktop(name) }
         do {
             _ = try await service.enrollCurrent(qualified(name, for: provider))
             changesSeen += 1
@@ -1070,4 +1245,305 @@ final class SigningIn {
     /// Whether to offer a field for the code the browser shows, which the tool is waiting
     /// to have typed back.
     var wantsCode: Bool { view.wantsCode }
+}
+
+// MARK: - Claude Desktop
+
+extension AppModel {
+    /// Claude as the core names it, when nothing says otherwise: the core names the app only
+    /// while it can see it running.
+    static let claudeApp = (bundleID: "com.anthropic.claudefordesktop", name: "Claude")
+
+    /// Whether Settings has anything to say about Claude Desktop: it is installed here, has an
+    /// account here, or live usage is on.
+    var desktopShown: Bool {
+        installed.contains(desktopProvider)
+            || status?.accounts.contains { $0.provider == desktopProvider } == true
+            // Live usage stays on, with its hold on Claude's key, after Claude is removed and
+            // its last account forgotten: the section is where it is turned off.
+            || liveUsage?.enabled == true
+    }
+
+    /// The Claude app Pitboard quits around a change to Claude Desktop's sign-in.
+    private func desktopApp() async -> (bundleID: String, name: String) {
+        for held in await service.holding(desktopProvider) {
+            if case .reopenApp(let bundleID, let name) = held.remedy {
+                return (bundleID, name)
+            }
+        }
+        return Self.claudeApp
+    }
+
+    /// Quits `app` the way Command-Q does, waits for its helpers to go, runs `body`, and
+    /// opens the same copy again if Pitboard quit it, whether or not `body` worked, leaving
+    /// the person where they were, unless `body` stopped partway. `body` is told whether the
+    /// app is being opened again. An
+    /// app that does not quit stops everything before anything has changed, and is not
+    /// opened: it never closed. Helpers that do not go stop everything too, and the app is
+    /// opened again.
+    private func quitThen(
+        _ app: (bundleID: String, name: String), failing title: String,
+        _ body: (Bool) async -> ActionFailure?
+    ) async -> ActionFailure? {
+        switch await appControl.quit(app.bundleID, within: quitWithin) {
+        case .stillRunning:
+            return ActionFailure(
+                title,
+                message: "\(app.name) is still open, so nothing has changed. Quit it, then "
+                    + "try again.",
+                code: "app_still_open")
+        case .notRunning:
+            return await body(false)
+        case .quit(let copy):
+            guard await closed(app.bundleID, of: desktopProvider) else {
+                appControl.open(copy, inFront: false)
+                return Self.stillClosing(title, app.name)
+            }
+            let failure = await body(true)
+            if !Self.leftUnfinished(failure) { appControl.open(copy, inFront: false) }
+            return failure
+        }
+    }
+
+    /// Whether `failure` left a change to Claude's files partway done: the core keeps a
+    /// record of it, and the next change finishes or undoes it. Claude, quit for the change,
+    /// is not opened again then, since it would start on half of each account. That includes
+    /// a record from before this change that the core could not read or settle, or that waits
+    /// for the app to quit: it refuses before the change starts, so it has no warning of its
+    /// own to say so, and the files are still half of each account.
+    nonisolated static func leftUnfinished(_ failure: ActionFailure?) -> Bool {
+        guard let failure else { return false }
+        return [
+            "app_opened_midway", "recovery_undetermined", "recovery_record_corrupt",
+            "recovery_failed", "recovery_waiting",
+        ].contains(failure.code)
+            || failure.warnings.contains { $0.code == "switch_unfinished" }
+    }
+
+    /// A Claude Desktop failure, said for the app rather than for a terminal. `reason` is
+    /// the one live usage recorded, where it was refused.
+    nonisolated static func desktopFailure(
+        _ title: String, _ error: Error, reason: String? = nil
+    ) -> ActionFailure {
+        let code = code(of: error)
+        return ActionFailure(
+            title, message: Advice.desktop(code, reason: reason) ?? saying(error), code: code,
+            warnings: warnings(of: error))
+    }
+
+    /// What a step of adding an account says when a switch is already running: the second
+    /// would wait behind the first anyway, and its sheet would be showing a stale account.
+    nonisolated private static func switchUnderWay(_ title: String) -> ActionFailure {
+        ActionFailure(
+            title, message: "Another switch is running. Try again when it has finished.",
+            code: "switch_under_way")
+    }
+
+    /// The first step of adding a Claude Desktop account: Claude is quit, the account in use
+    /// is parked and Claude left signed out, and Claude is opened again for somebody to sign
+    /// in to another account. Nothing is signed out on claude.ai. The sheet stays open for
+    /// the next step; a sign-out is not a switch to anybody, so nothing is said of one.
+    @discardableResult
+    func desktopAddAsked() async -> ActionFailure? {
+        let title = "Couldn’t put the account in use aside"
+        guard switchUnderWay == nil else { return Self.switchUnderWay(title) }
+        // Claimed before anything is awaited, as a switch claims it: a switch asked for
+        // while Claude quits would otherwise run beside this and leave the sheet naming an
+        // account that is no longer the one in use. A name no account has, so no row
+        // shows it.
+        switching = desktopProvider
+        defer { switching = nil }
+        var said: [Warning] = []
+        let failure = await quitThen(await desktopApp(), failing: title) { reopening in
+            do {
+                said = try await service.switchToSignedOut(desktopProvider).warnings
+                claudeLeftClosed = !reopening
+                changesSeen += 1
+                updatedAt = nil
+                return nil
+            } catch {
+                return Self.desktopFailure(title, error)
+            }
+        }
+        if let failure {
+            keep(failure)
+            return failure
+        }
+        desktopAwaiting = await service.awaitingSignIn()
+        resumedAwaiting = desktopAwaiting?.startedAt
+        await refresh()
+        warnings += said.filter { !warnings.contains($0) }
+        return nil
+    }
+
+    /// The last step: Claude is quit again, the account signed in to it now is enrolled as
+    /// `label`, and Claude is opened on it.
+    @discardableResult
+    func desktopEnrollAsked(label: String) async -> ActionFailure? {
+        await enrol(label, for: desktopProvider)
+    }
+
+    /// Enrols the account Claude is signed in to, with Claude quit: it rewrites its files
+    /// while it runs. Opened again before the read that follows, which can wait on the
+    /// network. A failure's warnings stay in the window once the sheet is closed.
+    private func enrolDesktop(_ name: String) async -> ActionFailure? {
+        let title = "Couldn’t name this account"
+        guard switchUnderWay == nil else { return Self.switchUnderWay(title) }
+        switching = desktopProvider
+        defer { switching = nil }
+        let target = qualified(name, for: desktopProvider)
+        let failure = await quitThen(await desktopApp(), failing: title) { _ in
+            do {
+                _ = try await service.enrollCurrent(target)
+                changesSeen += 1
+                updatedAt = nil
+                return nil
+            } catch {
+                return Self.desktopFailure(title, error)
+            }
+        }
+        if let failure {
+            keep(failure)
+            return failure
+        }
+        desktopAwaiting = await service.awaitingSignIn()
+        closeDesktopSheet()
+        await refresh()
+        return nil
+    }
+
+    /// Changing one's mind halfway through adding an account: the account parked for it is
+    /// switched back to, with Claude quit and opened again like any switch.
+    @discardableResult
+    func desktopPutBack() async -> ActionFailure? {
+        guard let from = desktopAwaiting?.fromLabel, switchUnderWay == nil else { return nil }
+        let target = qualified(from, for: desktopProvider)
+        switching = target
+        defer { switching = nil }
+        let failure = await quitThen(await desktopApp(), failing: "Couldn’t put \(from) back") {
+            reopening in
+            await switchWithoutReading(to: target, reopening: reopening)
+        }
+        if let failure { return failure }
+        desktopAwaiting = await service.awaitingSignIn()
+        closeDesktopSheet()
+        await refresh()
+        return nil
+    }
+
+    /// Closes the sheet for a Claude Desktop sign-in or name, once it has done its work.
+    private func closeDesktopSheet() {
+        guard let shown = sheet else { return }
+        switch shown {
+        case .add(let code):
+            if code == desktopProvider { sheet = nil }
+        case .signInAgain(let code, _), .name(let code, _):
+            if code == desktopProvider { sheet = nil }
+        case .rename, .liveUsage:
+            break
+        }
+    }
+
+    /// What the core keeps about Claude Desktop beside its accounts: whether live usage is
+    /// on, and an add left halfway. Neither reads Claude's key or asks anything of macOS, so
+    /// this never raises the keychain's prompt. The sheet for an add left halfway comes up
+    /// by itself only at the first read after the app opens.
+    func readDesktop() async {
+        guard tools.contains(where: { $0.code == desktopProvider }) else { return }
+        noteLiveUsage(await service.liveUsage())
+        let waiting = await service.awaitingSignIn()
+        let resuming = !desktopReadSinceLaunch
+        desktopReadSinceLaunch = true
+        desktopAwaiting = waiting
+        if resuming, let waiting, waiting.startedAt != resumedAwaiting, sheet == nil {
+            resumedAwaiting = waiting.startedAt
+            claudeLeftClosed = appControl.running(Self.claudeApp.bundleID) == nil
+            present(.add(provider: desktopProvider))
+        }
+    }
+
+    /// The sheet for an add left halfway, asked for from the menu or the window's notice.
+    func finishDesktopAddAsked() {
+        present(.add(provider: desktopProvider))
+    }
+
+    /// Opens Claude for the sign-in, where Pitboard left it closed because it was not open
+    /// to begin with.
+    @discardableResult
+    func openClaudeAsked() -> ActionFailure? {
+        let bundleID = Self.claudeApp.bundleID
+        guard let copy = appControl.running(bundleID) ?? appControl.installed(bundleID) else {
+            return ActionFailure(
+                "Couldn’t open Claude",
+                message: "macOS doesn’t know where Claude is. Open it from Applications.")
+        }
+        appControl.open(copy, inFront: false)
+        claudeLeftClosed = false
+        return nil
+    }
+
+    /// Keeps `state`, and says once that macOS stopped Pitboard reading Claude's key. Said
+    /// again only after live usage has worked in between, or been turned off.
+    private func noteLiveUsage(_ state: LiveUsageState) {
+        liveUsage = state
+        if state.enabled, state.approval == "needs_approval" {
+            guard !defaults.bool(forKey: DefaultsKey.liveUsagePauseTold) else { return }
+            defaults.set(true, forKey: DefaultsKey.liveUsagePauseTold)
+            notifier.tellLiveUsagePaused()
+        } else if state.approval == "granted" || !state.enabled {
+            defaults.removeObject(forKey: DefaultsKey.liveUsagePauseTold)
+        }
+    }
+
+    /// Shows the sheet that says what live usage reads and why macOS asks. Nothing else
+    /// turns it on: not a read, not a toggle, not a notification.
+    func liveUsageAsked() {
+        present(.liveUsage)
+    }
+
+    /// Opens the helper in Terminal; access grants stay inside the helper and Code.
+    func openDesktopCode(label: String) async {
+        guard switchUnderWay == nil, signingIn == nil else { return }
+        if case .failed(let message) = await machine.commandLineTool.openDesktopCode(
+            label: label)
+        {
+            present(ActionFailure("Couldn’t open Claude Code", message: message))
+        }
+    }
+
+    /// The sheet's Continue, and the one place live usage is turned on. Reading Claude's key
+    /// is what can raise the keychain's prompt, so it happens only here, asked for.
+    @discardableResult
+    func liveUsageEnableAsked() async -> ActionFailure? {
+        let before = await service.liveUsage()
+        do {
+            noteLiveUsage(try await service.enableLiveUsage())
+            if sheet == .liveUsage { sheet = nil }
+            updatedAt = nil
+            await refresh(asked: true)
+            return nil
+        } catch {
+            // What macOS answered, which the core records as the reason live usage needs
+            // approving. A question it could not ask records nothing, and an answer the same
+            // as the last one cannot be told from that; both are left to the core's message,
+            // which knows which it was.
+            let after = await service.liveUsage()
+            let reason =
+                after != before && after.approval == "needs_approval" ? after.reason : nil
+            return Self.desktopFailure("Couldn’t turn on live usage", error, reason: reason)
+        }
+    }
+
+    /// Turns live usage off, which reads nothing and asks nothing.
+    @discardableResult
+    func liveUsageDisable() async -> ActionFailure? {
+        do {
+            noteLiveUsage(try await service.disableLiveUsage())
+            updatedAt = nil
+            await refresh()
+            return nil
+        } catch {
+            return Self.desktopFailure("Couldn’t turn off live usage", error)
+        }
+    }
 }

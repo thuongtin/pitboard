@@ -174,7 +174,15 @@ if links "$app_binary" uniffi_pitboard_share_ffi_; then
     echo "the app links the share extension's library" >&2
     exit 1
 fi
+# Re-signing must retain the permission to ask for Terminal automation.
 # shellcheck disable=SC2086
-codesign --force $options --sign "$identity" "$app"
+codesign --force $options --sign "$identity" \
+    --entitlements apps/macos/App/Pitboard.entitlements "$app"
+automation=$(codesign -d --entitlements - --xml "$app" 2>/dev/null |
+    plutil -extract 'com\.apple\.security\.automation\.apple-events' raw - 2>/dev/null || true)
+[ "$automation" = true ] || {
+    echo "the app cannot request Terminal automation" >&2
+    exit 1
+}
 codesign --verify --strict --deep "$app"
 echo "built $app ($version, $(lipo -archs "$app/Contents/MacOS/Pitboard"))"

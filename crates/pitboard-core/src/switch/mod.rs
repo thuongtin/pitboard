@@ -22,6 +22,8 @@ mod journal;
 mod refusals;
 mod rename;
 pub(crate) mod renew;
+mod tree;
+mod tree_journal;
 #[cfg(test)]
 mod two_tools;
 mod uninstall;
@@ -34,6 +36,14 @@ pub(crate) use journal::interrupted_tool;
 pub use journal::{Abandoned, Recovered, pending as interrupted};
 pub use rename::rename;
 pub use renew::{Due, Renewal, renew_due, renew_parked};
+pub use tree::{Awaiting, awaiting_sign_in, sign_out};
+pub(crate) use tree::{
+    check_park as check_tree_park, expiring as tree_parks_expiring, note_organization,
+};
+pub use tree_journal::pending as tree_interrupted;
+pub use tree_journal::unfinished as tree_unfinished;
+pub use tree_journal::unreadable as tree_unreadable;
+pub use tree_journal::waiting as tree_waiting;
 pub use uninstall::{Removed, uninstall};
 
 use crate::context::Context;
@@ -64,8 +74,25 @@ pub enum Outcome {
         /// for two of the three tools is that nothing follows until they are restarted.
         adoption: provider::Adoption,
     },
+    /// The account signed in to a folder login was parked, and nothing is signed in there
+    /// now, so another account can be.
+    SignedOut {
+        provider: ProviderId,
+        from: String,
+        parked: Park,
+        adoption: provider::Adoption,
+    },
+    /// An account was put in place where nothing was signed in, so nothing was parked.
+    Installed {
+        provider: ProviderId,
+        to: String,
+        adoption: provider::Adoption,
+    },
     /// Not a failure: the state the caller asked for already holds.
     AlreadyActive { label: String },
+    /// Not a failure either: a sign-out of a folder login found nobody signed in to it, so
+    /// nothing was parked and nothing changed.
+    AlreadySignedOut { provider: ProviderId },
 }
 
 /// Pitboard's state, held exclusively, with any interrupted switch already finished. Every
@@ -82,7 +109,10 @@ pub fn abandon(ctx: &Context) -> Result<Option<Abandoned>> {
     refuse_custom_oauth(ctx, None)?;
     let _exclusive = exclusive(ctx)?;
     let mut state = state::load(ctx)?;
-    journal::abandon(ctx, &mut state)
+    match journal::abandon(ctx, &mut state)? {
+        Some(abandoned) => Ok(Some(abandoned)),
+        None => tree_journal::abandon(ctx, &mut state),
+    }
 }
 
 /// Under a custom OAuth endpoint Claude Code's live login is in "Claude Code-custom-oauth-
@@ -103,14 +133,30 @@ fn refuse_custom_oauth(ctx: &Context, tool: Option<ProviderId>) -> Result<()> {
 }
 
 /// What recovery found is returned apart from the `Settled`, so it can be reported whether
-/// or not the command that follows succeeds.
+/// or not the command that follows succeeds: a `Warning::Recovered` for each interrupted
+/// run settled now, a vault switch's and a folder login's alike, and a
+/// `Warning::RecoveryWaiting` for a folder login's run left for later.
 ///
 /// `tool` is the tool the change that follows is about, where it is about one.
-pub fn settle(ctx: &Context, tool: Option<ProviderId>) -> Result<(Settled, Option<Recovered>)> {
+pub fn settle(ctx: &Context, tool: Option<ProviderId>) -> Result<(Settled, Vec<Warning>)> {
     refuse_custom_oauth(ctx, tool)?;
     let exclusive = exclusive(ctx)?;
     let mut state = state::load(ctx)?;
-    let recovered = reconcile(ctx, &mut state)?;
+    let mut recovered: Vec<Warning> = reconcile(ctx, &mut state)?
+        .map(Warning::Recovered)
+        .into_iter()
+        .collect();
+    // A folder login's interrupted run is settled before a command about its tool, and
+    // where it can be before one about no tool in particular. Never before another tool's:
+    // the app being open must not stop a switch of Claude Code.
+    let tree = match tool {
+        None => tree_journal::reconcile(ctx, &mut state, tree_journal::Reconcile::IfQuiet)?,
+        Some(which) if provider::of(which).tree().is_some() => {
+            tree_journal::reconcile(ctx, &mut state, tree_journal::Reconcile::Required)?
+        }
+        Some(_) => None,
+    };
+    recovered.extend(tree);
     // After the journal has had its say, so a switch's own park is already accounted for.
     pending::sweep(ctx, &mut state)?;
     drop_live_twins(ctx, &mut state)?;
@@ -169,7 +215,7 @@ fn purge(ctx: &Context, state: &mut State) -> usize {
 /// Makes Pitboard runs exclusive of each other. A kernel lock, unlike the directory lock
 /// Claude Code's protocol requires around its own writes: the operating system releases it
 /// when a process ends, so there is no staleness rule for two runs to both satisfy.
-fn exclusive(ctx: &Context) -> Result<std::fs::File> {
+pub(crate) fn exclusive(ctx: &Context) -> Result<std::fs::File> {
     let (file, path) = lock_file(ctx)?;
     file.lock()
         .map_err(|source| Error::HomeUnwritable { path, source })?;
@@ -270,6 +316,9 @@ fn read_live(
 }
 
 pub fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warning>)> {
+    if provider::of(key.provider).tree().is_some() {
+        return tree::switch(settled, key);
+    }
     let Settled {
         _exclusive,
         mut state,
@@ -632,7 +681,9 @@ pub(crate) fn still_holding(ctx: &Context, which: ProviderId) -> Option<Vec<hold
         provider::Adoption::RestartRequired { program, holders } => {
             holder::find(ctx, program, holders).filter(|holding| !holding.is_empty())
         }
-        provider::Adoption::PollingWithin(_) => None,
+        // An app that reads its login only when it starts is asked to quit before a switch,
+        // by the tree engine, not told afterwards that it still holds the old one.
+        provider::Adoption::PollingWithin(_) | provider::Adoption::NextLaunch { .. } => None,
     }
 }
 

@@ -22,6 +22,10 @@ const AUTH_BASE: &str = "https://platform.claude.com";
 /// Claude Code's own OAuth client, which every login it stores was issued to.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
+pub(crate) fn oauth_client() -> &'static str {
+    CLIENT_ID
+}
+
 /// Where requests go instead, for tests. Nothing else may redirect them, because an address
 /// that answers "this token belongs to account X" decides which account a credential is filed
 /// under. Only loopback is accepted, so a token or an answer never leaves this machine.
@@ -39,7 +43,7 @@ fn auth_base(ctx: &Context) -> String {
 
 /// Judged on the parsed host, never on a prefix: `http://127.0.0.1:@elsewhere/` begins like
 /// loopback and is not. A name is refused too, since the hosts file decides where it points.
-fn is_loopback(url: &str) -> bool {
+pub(crate) fn is_loopback(url: &str) -> bool {
     let Ok(uri) = url.parse::<ureq::http::Uri>() else {
         return false;
     };
@@ -76,6 +80,10 @@ pub enum ApiError {
     Network(String),
     #[error("Anthropic answered {status}")]
     Unexpected { status: u16 },
+    /// Something in front of the service stopped the request before it was read, such as
+    /// claude.ai's bot check: nothing is known about the login, and it may pass later.
+    #[error("{by} stopped the request ({status})")]
+    Blocked { status: u16, by: &'static str },
     #[error("Anthropic's answer was not understood: {0}")]
     Malformed(String),
     /// The refresh token was refused for good: revoked, or already used elsewhere.

@@ -34,6 +34,7 @@ pub mod assumptions;
 pub mod audit;
 pub mod budget;
 pub mod context;
+pub mod desktop_code;
 pub mod doctor;
 pub mod error;
 pub mod label;

@@ -45,6 +45,7 @@
 
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod desktop;
 pub(crate) mod jwt;
 mod printed;
 
@@ -65,6 +66,9 @@ use serde_json::Value;
 pub enum ProviderId {
     Claude,
     Codex,
+    /// Claude Desktop, the app. Its login is a folder of files rather than one document,
+    /// so it parks through [`TreeLogin`] and never through a credential store.
+    Desktop,
 }
 
 impl ProviderId {
@@ -73,7 +77,8 @@ impl ProviderId {
     /// Named rather than written out at each call site, because resolving a bare label has
     /// to look at all of them and a provider missing from one such list would simply never
     /// be found, with nothing failing to say so.
-    pub const ALL: &'static [ProviderId] = &[ProviderId::Claude, ProviderId::Codex];
+    pub const ALL: &'static [ProviderId] =
+        &[ProviderId::Claude, ProviderId::Codex, ProviderId::Desktop];
 
     /// The one spelling used in a label prefix, in the state file, in a park's name and in
     /// the audit log. Written once so those four cannot drift, and chosen from the command
@@ -83,6 +88,7 @@ impl ProviderId {
         match self {
             ProviderId::Claude => "claude",
             ProviderId::Codex => "codex",
+            ProviderId::Desktop => "desktop",
         }
     }
 
@@ -93,7 +99,7 @@ impl ProviderId {
     /// somebody can act on and "could not reach the service" is not.
     pub fn service(self) -> &'static str {
         match self {
-            ProviderId::Claude => "Anthropic",
+            ProviderId::Claude | ProviderId::Desktop => "Anthropic",
             ProviderId::Codex => "OpenAI",
         }
     }
@@ -103,49 +109,69 @@ impl ProviderId {
         match self {
             ProviderId::Claude => "Claude Code",
             ProviderId::Codex => "Codex",
+            ProviderId::Desktop => "Claude Desktop",
         }
     }
 
-    /// The command a person types to run the tool.
+    /// The command a person types to run the tool, or for an app the name it is opened by.
     pub fn program(self) -> &'static str {
         match self {
             ProviderId::Claude => "claude",
             ProviderId::Codex => "codex",
+            ProviderId::Desktop => "Claude",
         }
     }
 
     /// Pitboard's own environment variable naming the tool's program outright, in place of
-    /// the one it would find: one installed where nothing looks, or a stand-in.
+    /// the one it would find: one installed where nothing looks, or a stand-in. For Claude
+    /// Desktop it names the app bundle, whose program is inside it.
     pub fn program_variable(self) -> &'static str {
         match self {
             ProviderId::Claude => "PITBOARD_CLAUDE",
             ProviderId::Codex => "PITBOARD_CODEX",
+            ProviderId::Desktop => "PITBOARD_CLAUDE_DESKTOP_APP",
+        }
+    }
+
+    /// Whether the tool's program is a command, looked for on a search path. Claude Desktop
+    /// is an app, found in its bundle and never on a `PATH`, where a volume that ignores case
+    /// would take Claude Code's `claude` for the app's `Claude`.
+    pub fn on_path(self) -> bool {
+        match self {
+            ProviderId::Claude | ProviderId::Codex => true,
+            ProviderId::Desktop => false,
         }
     }
 
     /// Where the tool's own installers put its program under `home`, for an app that has no
-    /// shell's `PATH` to find it on. Each tool says its own, read from its own build.
+    /// shell's `PATH` to find it on. Each tool says its own, read from its own build. None
+    /// for a tool that is not [`ProviderId::on_path`].
     pub fn install_places(self, home: &std::path::Path) -> Vec<std::path::PathBuf> {
         match self {
             ProviderId::Claude => claude::paths::install_places(home),
             ProviderId::Codex => codex::paths::install_places(home),
+            ProviderId::Desktop => Vec::new(),
         }
     }
 
-    /// The environment variable that moves where the tool keeps its login.
+    /// The environment variable that moves where the tool keeps its login. Claude Desktop
+    /// has none of its own, so this is the one Pitboard reads to look somewhere else.
     pub fn home_variable(self) -> &'static str {
         match self {
             ProviderId::Claude => "CLAUDE_CONFIG_DIR",
             ProviderId::Codex => "CODEX_HOME",
+            ProviderId::Desktop => "PITBOARD_CLAUDE_DESKTOP_DIR",
         }
     }
 
     /// What a person runs to sign in with the tool's own command. Claude Code signs in from
-    /// inside the program it starts; Codex has a subcommand for it.
+    /// inside the program it starts; Codex has a subcommand for it; Claude Desktop signs in
+    /// from its own window.
     pub fn login_command(self) -> &'static str {
         match self {
             ProviderId::Claude => "claude",
             ProviderId::Codex => "codex login",
+            ProviderId::Desktop => "open -a Claude",
         }
     }
 
@@ -153,6 +179,7 @@ impl ProviderId {
         match code {
             "claude" => Some(ProviderId::Claude),
             "codex" => Some(ProviderId::Codex),
+            "desktop" => Some(ProviderId::Desktop),
             _ => None,
         }
     }
@@ -245,6 +272,11 @@ pub enum ProviderError {
     /// document the machine also keeps other things in. Not a malformed login: none.
     #[error("nothing is signed in")]
     NoLogin { provider: ProviderId },
+    /// The tool keeps its login as a folder of files, not as a credential, so there is no
+    /// document to read, identify or renew. Asked of Claude Desktop only by a caller that
+    /// missed [`Provider::tree`].
+    #[error("this tool's login is a folder of files, not a credential")]
+    NotACredential,
 }
 
 /// When a session that is already running picks a switch up.
@@ -267,6 +299,10 @@ pub enum Adoption {
         program: &'static str,
         holders: &'static [crate::holder::Holder],
     },
+    /// An app that reads its login when it opens and cannot be switched while it is open
+    /// at all, so a switch is refused until it is quit and is taken when it is next opened.
+    /// Nothing is ever running to follow.
+    NextLaunch { program: &'static str },
 }
 
 /// Whether a parked copy may exist while the same account is still live.
@@ -505,6 +541,59 @@ pub(crate) trait Provider: Send + Sync + std::fmt::Debug {
 
     /// When a slice stops being askable and stops being restorable.
     fn expiry(&self, slice: &Value) -> Expiry;
+
+    /// The folder-of-files side of a tool whose login is not a credential, which is parked
+    /// by moving the folder's items rather than by reading and writing a document. `None`
+    /// for every tool whose login is a credential, and every operation above that reads one
+    /// is an error for a tool that has this.
+    fn tree(&self) -> Option<&'static dyn TreeLogin> {
+        None
+    }
+}
+
+/// One tool's login as a folder of files: what is in it that belongs to the account, how
+/// to tell whose it is, and what has to be closed before any of it can be moved.
+///
+/// Claude Desktop keeps its login in Chromium's cookie jar, its storage folders and three
+/// keys of its `config.json`, all inside one data folder beside things that belong to the
+/// machine. Parking it is a rename of those items, so a park is never a copy, and nothing
+/// may hold them open while they move.
+// Read by the tree engine and the switch built on it, which this trait is the boundary for.
+#[allow(dead_code)]
+pub(crate) trait TreeLogin: Send + Sync + std::fmt::Debug {
+    /// The live data folder, where there is one on this platform.
+    fn root(&self, ctx: &Context) -> Option<std::path::PathBuf>;
+
+    /// The items in the data folder that belong to the account, relative to it.
+    fn items(&self) -> &'static [TreeItem];
+
+    /// The keys of the data folder's `config.json` that belong to the account.
+    fn config_keys(&self) -> &'static [&'static str];
+
+    /// The app bundle whose processes hold the folder open, as `ctx` places the app.
+    fn bundle<'a>(&self, ctx: &'a Context) -> crate::host::Bundle<'a>;
+
+    /// Paths inside the bundle whose processes belong to something else and do not count.
+    fn excluded(&self) -> &'static [&'static str];
+
+    /// The file in the data folder naming the process that has it open, where there is one.
+    fn singleton_lock(&self) -> Option<&'static str>;
+
+    /// Every kind of process that holds the folder, and what makes each let go of it.
+    fn holders(&self) -> &'static [crate::holder::Holder];
+
+    /// Whose login the folder at `root` holds. `Ok(None)` when nothing is signed in there.
+    fn identify(
+        &self,
+        ctx: &Context,
+        root: &std::path::Path,
+    ) -> Result<Option<desktop::TreeIdentity>, crate::error::Error>;
+}
+
+/// One item of a tree login: a file or a folder, relative to the data folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TreeItem {
+    pub path: &'static str,
 }
 
 /// What a tool's sign-in has printed so far comes to, for an app showing it while it runs.
@@ -613,6 +702,28 @@ pub(crate) fn command(ctx: &Context, tool: ProviderId) -> std::process::Command 
     command
 }
 
+/// The account `which` is signed in to, by its own files. A tool whose login is a folder says
+/// it by the session in it: Log out leaves the config naming the account that was there, so
+/// the config alone would call a signed-out folder signed in. Empty when nobody is.
+pub(crate) fn signed_in_account(ctx: &Context, which: ProviderId) -> Option<String> {
+    let tool = of(which);
+    if let Some(tree) = tool.tree()
+        && let Some(root) = tree.root(ctx)
+    {
+        // A session that cannot be read is nobody known, not the account the config still
+        // names: that is what Log out leaves behind. A jar the app is writing at this moment
+        // is only busy, and the account Pitboard last put there is still the one in use.
+        return match tree.identify(ctx, &root) {
+            Ok(found) => Some(found.map(|live| live.account_uuid).unwrap_or_default()),
+            Err(crate::error::Error::DesktopDataBusy { .. }) => {
+                tool.recorded_identity(ctx).map(|id| id.account_id)
+            }
+            Err(_) => None,
+        };
+    }
+    tool.recorded_identity(ctx).map(|id| id.account_id)
+}
+
 /// The implementation for one tool.
 ///
 /// An exhaustive match rather than a lookup, so a tool added to [`ProviderId`] and not to
@@ -621,12 +732,28 @@ pub(crate) fn of(provider: ProviderId) -> &'static dyn Provider {
     match provider {
         ProviderId::Claude => &claude::engine::Claude,
         ProviderId::Codex => &codex::engine::Codex,
+        ProviderId::Desktop => &desktop::DESKTOP,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A jar that cannot be read says nothing of who is signed in. The config still names the
+    /// account that was there, so falling back to it would call a session that could not be
+    /// established signed in.
+    #[test]
+    fn a_login_folder_whose_session_cannot_be_read_names_nobody() {
+        use crate::switch::harness::desktop_machine;
+        let m = desktop_machine("identity-unreadable");
+        assert_eq!(
+            signed_in_account(&m.ctx, ProviderId::Desktop).as_deref(),
+            Some("here")
+        );
+        m.mem.jar_fails(std::io::ErrorKind::InvalidData);
+        assert_eq!(signed_in_account(&m.ctx, ProviderId::Desktop), None);
+    }
 
     /// The code is written into a label prefix, the state file, a park's name and the audit
     /// log. If it ever stopped round-tripping, a state file would load with an account
@@ -651,10 +778,10 @@ mod tests {
         // compiling, which is the point.
         for &id in ProviderId::ALL {
             match id {
-                ProviderId::Claude | ProviderId::Codex => {}
+                ProviderId::Claude | ProviderId::Codex | ProviderId::Desktop => {}
             }
         }
-        assert_eq!(ProviderId::ALL.len(), 2, "add the new provider to ALL");
+        assert_eq!(ProviderId::ALL.len(), 3, "add the new provider to ALL");
     }
 
     /// A code is also what serde writes, so the two spellings must not drift.
@@ -752,6 +879,14 @@ mod tests {
         }
     }
 
+    /// The tools started from a program on the search path. Claude Desktop is an app opened
+    /// from where it is installed, and nothing here signs in to it.
+    fn on_the_search_path() -> impl Iterator<Item = &'static ProviderId> {
+        ProviderId::ALL
+            .iter()
+            .filter(|&&tool| of(tool).tree().is_none())
+    }
+
     fn env_of<'a>(command: &'a std::process::Command, name: &str) -> Option<&'a std::ffi::OsStr> {
         command
             .get_envs()
@@ -811,7 +946,7 @@ mod tests {
         let ctx =
             Context::new(std::path::PathBuf::from("/nowhere")).with_search_path(search.clone());
         let dir = std::path::Path::new("/tmp/pitboard-signin-scratch");
-        for &tool in ProviderId::ALL {
+        for &tool in on_the_search_path() {
             let command = of(tool).sign_in(&ctx, dir);
             let program = prefix.bin().join(tool.program());
             assert_eq!(command.get_program(), program.as_os_str(), "{tool}");
@@ -832,7 +967,7 @@ mod tests {
             .with_codex_program(prefix.bin().join("codex"))
             .with_search_path("/usr/bin:/bin".into());
         let dir = std::path::Path::new("/tmp/pitboard-signin-scratch");
-        for &tool in ProviderId::ALL {
+        for &tool in on_the_search_path() {
             let command = of(tool).sign_in(&ctx, dir);
             assert_eq!(
                 command.get_program(),
@@ -847,7 +982,7 @@ mod tests {
         }
         let on_it = format!("/usr/bin:{}/", prefix.bin().display());
         let ctx = ctx.with_search_path(on_it.clone());
-        for &tool in ProviderId::ALL {
+        for &tool in on_the_search_path() {
             let command = of(tool).sign_in(&ctx, dir);
             assert_eq!(env_of(&command, "PATH"), Some(on_it.as_ref()), "{tool}");
         }
@@ -860,7 +995,7 @@ mod tests {
         let ctx = Context::new(std::path::PathBuf::from("/nowhere"))
             .with_search_path("/nowhere/at/all".into());
         let dir = std::path::Path::new("/tmp/pitboard-signin-scratch");
-        for &tool in ProviderId::ALL {
+        for &tool in on_the_search_path() {
             let command = of(tool).sign_in(&ctx, dir);
             assert_eq!(command.get_program(), tool.program(), "{tool}");
             assert_eq!(
@@ -899,7 +1034,11 @@ mod tests {
     #[test]
     fn a_code_is_asked_for_only_where_the_tool_takes_one() {
         let said = "Paste code here if prompted > ";
-        for (tool, takes) in [(ProviderId::Claude, true), (ProviderId::Codex, false)] {
+        for (tool, takes) in [
+            (ProviderId::Claude, true),
+            (ProviderId::Codex, false),
+            (ProviderId::Desktop, false),
+        ] {
             assert_eq!(sign_in_view(tool, said, false).wants_code, takes, "{tool}");
             assert!(
                 !sign_in_view(tool, said, true).wants_code,

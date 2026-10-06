@@ -289,3 +289,15 @@ fn an_npm_installed_codex_signs_in_from_a_path_without_its_directory() {
         "it signed in to the private home and nowhere else"
     );
 }
+
+/// Codex signs in to OpenAI, so it has no account in another Claude app to switch along
+/// with: `--both` asked of a Codex account is a usage error, and nothing is switched.
+#[test]
+fn use_both_is_refused_for_codex() {
+    let env = two_codex_accounts("codex-both");
+    let before = env.codex_live();
+    let (out, _, code) = env.run(&["--json", "use", "codex/personal", "--both"]);
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(envelope(&out)["error"]["code"], "usage", "{out}");
+    assert_eq!(env.codex_live(), before, "nothing was switched");
+}

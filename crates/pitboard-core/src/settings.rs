@@ -61,7 +61,7 @@ fn managed_dir() -> PathBuf {
     })
 }
 
-fn managed_files() -> Vec<PathBuf> {
+pub(crate) fn managed_files() -> Vec<PathBuf> {
     let dir = managed_dir();
     let mut files = vec![dir.join("managed-settings.json")];
     if let Ok(entries) = std::fs::read_dir(dir.join("managed-settings.d")) {
@@ -79,6 +79,17 @@ fn managed_files() -> Vec<PathBuf> {
 /// A value Claude Code would read as set. An empty string, `0` and `false` are not.
 fn is_set(value: &str) -> bool {
     !matches!(value.trim(), "" | "0" | "false")
+}
+
+/// Whether a settings `env` value is one Claude Code would read as set: a string that is
+/// not empty, `0` or `false`, `true`, or a non-zero number.
+pub(crate) fn env_value_is_set(value: &Value) -> bool {
+    match value {
+        Value::String(v) => is_set(v),
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_i64() != Some(0),
+        _ => false,
+    }
 }
 
 fn overrides_in(path: &std::path::Path) -> Vec<Override> {
@@ -103,13 +114,7 @@ fn overrides_in(path: &std::path::Path) -> Vec<Override> {
     }
     if let Some(env) = json.get("env").and_then(Value::as_object) {
         for name in OVERRIDING_ENV {
-            let set = match env.get(name) {
-                Some(Value::String(v)) => is_set(v),
-                Some(Value::Bool(b)) => *b,
-                Some(Value::Number(n)) => n.as_i64() != Some(0),
-                _ => false,
-            };
-            if set {
+            if env.get(name).is_some_and(env_value_is_set) {
                 found.push(Override {
                     layer: layer.clone(),
                     key: format!("env.{name}"),

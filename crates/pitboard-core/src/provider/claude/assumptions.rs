@@ -184,6 +184,28 @@ pub const ASSUMPTIONS: &[Assumption] = &[
     },
     Assumption {
         name: "oauth_client",
+        // Cross-client study, 5 October 2026: the installed macOS build 2.1.289 still
+        // declares this production CLIENT_ID. Its login scope list is user:profile,
+        // user:inference, user:sessions:claude_code, user:mcp_servers and user:file_upload,
+        // with user:plugins enabled by PLUGINS_SCOPE_REGISTERED. Read from the embedded
+        // JavaScript, without executing the CLI or reading credentials. This does not
+        // establish whether an existing Desktop grant is accepted by Code or its refresh.
+        // Experiment T1, 5 October 2026, macOS Code 2.1.289 / Desktop 2.19675.0:
+        // each of two Desktop Code-client grants returned its expected account from
+        // /api/oauth/profile (200), then completed a Haiku request in Code via
+        // CLAUDE_CODE_OAUTH_TOKEN and the grant's scopes. Fresh per-run homes had no
+        // login without that token. Print mode ran without tools, MCP or persistence.
+        // --bare rejected OAuth before inference; normal print mode succeeded. No
+        // refresh token was passed to Code, so T1 does not verify a shared refresh chain.
+        // T2, 5 October 2026: the new Desktop Code service verified each account and
+        // organisation, then completed print-mode Haiku requests for both accounts with
+        // hostile auth/remote/socket environment flags removed. The service used its
+        // scripted SafeStorage seam in disposable homes; no refresh was attempted.
+        // Read from the same 2.1.289 binary: settings env is applied on startup/reload
+        // (offsets 182953004/182954278), remote/socket flags allow disk-token recovery
+        // (182349501/182351471), and transcript/resume paths use config-dir/projects
+        // (181162179/183441948/181163768). The launcher isolates config and settings,
+        // clears these auth inputs and keeps projects separately per Desktop account.
         fact: "every login Claude Code stores was issued to client 9d1c250a-e61b-44d9-88ed-5944d1962f5e, \
                and a refresh answer without a refresh-token lifetime keeps the one it had",
         read_from: "the OAuth client id and the token refresh path",

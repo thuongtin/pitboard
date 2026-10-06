@@ -166,6 +166,12 @@ struct AccountsPane: View {
             Button("Name…") { perform(said.action) }
         }
         if let label = account.label, !account.unplaced {
+            if account.provider == "desktop" {
+                Button("Open Claude Code…") {
+                    Task { await model.openDesktopCode(label: label) }
+                }
+                .disabled(model.switchUnderWay != nil || model.signingIn != nil)
+            }
             Button("Sign In Again…") {
                 model.present(.signInAgain(provider: account.provider, label: label))
             }
@@ -220,6 +226,10 @@ struct AccountsPane: View {
             givingUp = true
         case .dismissAbandoned:
             model.forgetAbandoned()
+        case .allowLiveUsage:
+            model.liveUsageAsked()
+        case .finishDesktopAdd:
+            model.finishDesktopAddAsked()
         }
     }
 
@@ -265,8 +275,9 @@ private struct SetupTip: View {
             Tip(
                 symbol: "tag",
                 title: "Give this account a name",
-                detail: "\(email) is signed in\(to(provider)). Pitboard parks logins "
-                    + "under a name you choose, and can’t park this one until it has one."
+                detail: "\(whoIsSignedIn(email)) is signed in\(to(provider)). Pitboard parks "
+                    + "logins under a name you choose, and can’t park this one until it has "
+                    + "one."
             ) {
                 Button("Name…") { model.present(.name(provider: provider, email: email)) }
                     .buttonStyle(.borderedProminent)

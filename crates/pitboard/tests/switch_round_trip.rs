@@ -680,6 +680,31 @@ fn uninstalling_takes_the_parked_logins_with_it() {
     assert_eq!(env.live()["claudeAiOauth"]["refreshToken"], "refresh-a");
 }
 
+/// Claude Desktop data Pitboard never deletes stays behind an uninstall, and a script reads
+/// the report instead of the prose, so the folders kept are in the JSON too.
+#[test]
+fn uninstall_json_lists_the_desktop_folders_it_kept() {
+    let env = two_accounts("uninstall-kept-json");
+    let strays = env.root.join("pitboard/desktop/strays");
+    common::guard_not_live_dir(&strays);
+    std::fs::create_dir_all(&strays).unwrap();
+    std::fs::write(strays.join("1-Cookies"), b"made by Claude").unwrap();
+
+    let (out, err, code) = env.run(&["uninstall", "--yes", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let value: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(value["data"]["home_removed"], false);
+    let kept: Vec<_> = value["data"]["kept"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no `kept` list: {out}"))
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].ends_with("desktop/strays"), "{kept:?}");
+}
+
 /// macOS reads at most 4097 bytes of command from `security`'s stdin, and MCP server tokens
 /// make a login larger than that. There is no third way to write one: the only other route
 /// `security` offers is the argument line, which is what Claude Code uses for the same

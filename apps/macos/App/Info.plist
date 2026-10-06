@@ -53,5 +53,7 @@
 	<!-- What macOS shows if it asks before an account's window saves a download. -->
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>Pitboard saves what you download in an account's window to your Downloads folder.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Pitboard opens Claude Code in Terminal with the Claude Desktop account you choose.</string>
 </dict>
 </plist>
