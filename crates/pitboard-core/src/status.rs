@@ -1179,7 +1179,7 @@ fn assemble(
             Err(stale) => {
                 let known = merge(recalled.as_ref(), cached.as_ref(), now);
                 let shown = match (known, facts.desktop_history.get(key)) {
-                    (Some(known), Some(written)) if written.observed_at < known.observed_at => {
+                    (Some(known), Some(written)) if written.observed_at <= known.observed_at => {
                         Some(known)
                     }
                     (_, Some(written)) => Some(written.clone()),
@@ -1586,6 +1586,34 @@ mod tests {
             Source::Live,
             "a live reading ahead is shown as live"
         );
+    }
+
+    /// Claude Desktop's history is stamped in milliseconds cut to seconds, as a live reading
+    /// is, so the two can fall in one second. The reading Pitboard measured stays then: the
+    /// history is shown only once it is strictly newer.
+    #[test]
+    fn a_measured_reading_is_kept_when_the_history_ties_it() {
+        let s = state(&["work"]);
+        let key = s.accounts[0].usage_key();
+        let mut f = facts(
+            "work-uuid",
+            Err(Stale::Unreachable),
+            vec![Err(Stale::NothingParked)],
+        );
+        let mut written = reading(40.0, Source::DesktopHistory, None);
+        written.observed_at = Some(NOW - 60);
+        f.desktop_history.insert(key, written);
+        let recorded = |_: &str| {
+            let mut measured = reading(22.0, Source::Remembered, Some("work-uuid"));
+            measured.observed_at = Some(NOW - 60);
+            Some(measured)
+        };
+        let usage = assemble(&s, &f, recorded, nothing_known, NOW)[0]
+            .usage
+            .clone()
+            .unwrap();
+        assert_eq!(usage.windows[0].percent, 22.0);
+        assert_ne!(usage.source, Source::DesktopHistory);
     }
 
     /// A banked reset used on claude.ai lowers a limit's share and keeps its reset, as this

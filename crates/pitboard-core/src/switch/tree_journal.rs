@@ -460,6 +460,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
             let config = paths::config_file(&root);
             let original = kept_keys(&kept, &journal.config_keys.from).map_err(undetermined)?;
             if config::read_keys(&config)? != original {
+                keep_keys_of_strays(ctx, &mut strays, &config, &original)?;
                 config::splice(&config, &original)?;
             }
         }
@@ -514,7 +515,8 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
             }
         }
     }
-    take(ctx, which, steps, &mut moves::Strays::new())?;
+    let mut strays = moves::Strays::new();
+    take(ctx, which, steps, &mut strays)?;
     crate::fault::point("tree.recovery_moved");
 
     // The app rewrites its config as it runs, so it is asked once more, as before every move.
@@ -525,10 +527,12 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         Operation::Switch => {
             let keys = to_park.as_ref().map(|dir| dir.join(CONFIG_KEYS_FILE));
             match keys.filter(|keys| keys.is_file()) {
-                Some(keys) => config::splice(
-                    &config,
-                    &kept_keys(&keys, &journal.config_keys.to).map_err(undetermined)?,
-                )?,
+                Some(keys) => {
+                    let incoming =
+                        kept_keys(&keys, &journal.config_keys.to).map_err(undetermined)?;
+                    keep_keys_of_strays(ctx, &mut strays, &config, &incoming)?;
+                    config::splice(&config, &incoming)?;
+                }
                 // Spliced and the park deleted already, when the folder says so.
                 None if verified(ctx, journal, &root)? => {}
                 None => {
@@ -590,6 +594,27 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         finished: true,
         signed_out: journal.operation == Operation::SignOut,
     })
+}
+
+/// The keys of the config a recovery is about to write over, set aside with the strays when
+/// the run set a login's items aside. They belong to a login the app made since the crash,
+/// and a session without them is only half of one. Nothing is kept when nothing was set
+/// aside, so the keys of an app that only rewrote its config are not.
+fn keep_keys_of_strays(
+    ctx: &Context,
+    strays: &mut moves::Strays,
+    config: &Path,
+    incoming: &ConfigKeys,
+) -> Result<()> {
+    if !strays.used() {
+        return Ok(());
+    }
+    let left = config::read_keys(config)?;
+    if !left.0.is_empty() && left != *incoming {
+        let slot = strays.dir(ctx)?;
+        tree::write_secret_json(&slot.join(CONFIG_KEYS_FILE), &left.0)?;
+    }
+    Ok(())
 }
 
 /// Whether the folder at `root` holds the incoming account's session: by its fingerprint,
@@ -799,6 +824,48 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{point}: recovery refused: {e}"));
             assert!(m.strays_hold(made), "{point}: set aside, never deleted");
             hold(&m, point, &before);
+        }
+    }
+
+    /// Claude opened on what a crash left and signed in to another account, writing that
+    /// login's keys into the config as well as its session. Recovery sets the session aside
+    /// and puts the keys of the config back, so the keys go aside with it: a session without
+    /// the caches and the uuid is only half a login.
+    #[test]
+    fn every_tree_point_keeps_the_config_keys_of_a_login_claude_made() {
+        for point in TREE_POINTS {
+            if point == "tree.recorded" || point == "tree.config_spliced" {
+                continue;
+            }
+            let m = desktop_machine(&format!("stray-keys-{}", point.replace('.', "-")));
+            assert_eq!(m.crash_at(point).unwrap_err(), point);
+            let cookies = m.support().join("Cookies");
+            if cookies.exists() {
+                continue;
+            }
+            std::fs::write(&cookies, b"made by Claude").unwrap();
+            m.mem.plant_cookies(&cookies, jar("v10made", NOW + 86_400));
+            let config = m.support().join("config.json");
+            let mut written: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+            written["oauth:tokenCacheV2"] = serde_json::json!("cache-made-by-claude");
+            std::fs::write(&config, written.to_string()).unwrap();
+
+            m.recover()
+                .unwrap_or_else(|e| panic!("{point}: recovery refused: {e}"));
+            let mut kept = Vec::new();
+            crate::switch::harness::files_under(
+                &crate::provider::desktop::paths::strays_dir(&m.ctx),
+                &mut kept,
+            );
+            assert!(
+                kept.iter()
+                    .filter(|path| path.file_name().is_some_and(|n| n == CONFIG_KEYS_FILE))
+                    .any(|path| std::fs::read_to_string(path)
+                        .unwrap()
+                        .contains("cache-made-by-claude")),
+                "{point}: the keys of the login Claude made are set aside"
+            );
         }
     }
 
