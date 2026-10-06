@@ -532,9 +532,17 @@ fn in_use(ctx: &Context, state: &State) -> Vec<ProviderId> {
         .collect()
 }
 
+/// The folder switch a crash left, as the two sides it names. A record that cannot be read
+/// is one too, with sides nobody can name: the login may be half moved, and nothing that
+/// would read it can be told apart from the interrupted switch's.
+fn unsettled_tree(ctx: &Context) -> Option<(String, String)> {
+    crate::switch::tree_interrupted(ctx)
+        .or_else(|| crate::switch::tree_unreadable(ctx).map(|_| (String::new(), String::new())))
+}
+
 pub fn gather_offline(ctx: &Context, state: &State) -> Report {
     let tools = in_use(ctx, state);
-    let recovery = crate::switch::tree_interrupted(ctx);
+    let recovery = unsettled_tree(ctx);
     // A folder login is never asked offline either, and why says more than "not asked":
     // asking is off, or the folder may hold either account's items.
     let unasked = |which: ProviderId| {
@@ -961,7 +969,7 @@ pub fn gather(ctx: &Context, state: &State, fresh: bool) -> Report {
     // what a usage call needs is not the same everywhere, and pulling one field out here
     // would decide that for all of them.
     let tools = in_use(ctx, state);
-    let recovery = crate::switch::tree_interrupted(ctx);
+    let recovery = unsettled_tree(ctx);
     let live_documents: Vec<(ProviderId, Result<Option<Value>, ProviderError>)> = tools
         .iter()
         .copied()
@@ -2970,6 +2978,37 @@ mod tests {
                 to: "desktop/there".into(),
             })
         );
+    }
+
+    /// A record of the switch that cannot be read is an interrupted switch too: the login may
+    /// be half moved, so nobody is asked about it, online or not.
+    #[test]
+    fn an_unreadable_desktop_journal_is_an_unsettled_switch_in_a_status() {
+        let m = crate::switch::harness::desktop_machine("status-journal-unreadable");
+        m.crash_at("tree.live_parked").unwrap_err();
+        std::fs::write(
+            crate::provider::desktop::paths::desktop_home(&m.ctx).join("journal.json"),
+            b"{ this is not a journal",
+        )
+        .unwrap();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding())
+            .with_scripted_api(ScriptedApi::new());
+        let state = crate::state::load(&ctx).expect("the machine's accounts");
+
+        for report in [gather(&ctx, &state, false), gather_offline(&ctx, &state)] {
+            for label in ["here", "there"] {
+                assert_eq!(
+                    desktop_row(&report, label).stale,
+                    Some(Stale::RecoveryWaiting),
+                    "{label}"
+                );
+            }
+            let desktop = report.desktop.as_ref().expect("the app's accounts");
+            assert!(desktop.recovery_waiting.is_some());
+        }
     }
 
     /// A machine that has never had the app is told nothing about it.

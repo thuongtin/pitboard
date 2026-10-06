@@ -708,7 +708,11 @@ fn park_out(
     // Recording the park is the point after which a run is finished rather than undone, so
     // the app is asked about once more first: opened since the last move, it may have
     // written to a folder whose items are gone, and that run must be undone.
+    fault::point("tree.park_verified");
     still_quiet(ctx, which)?;
+    // The park is looked at once more, as late as it can be: what was verified above is the
+    // folder that is recorded, not one a link put there since.
+    dir_anchor.still_there()?;
     note_session(state, from_key, outgoing);
     let park = Park {
         service: name,
@@ -2156,6 +2160,40 @@ mod tests {
         let displaced = m.support().with_file_name("displaced-park");
         let refused = fault::meanwhile(
             "tree.park_stored",
+            move || {
+                for entry in std::fs::read_dir(&parks).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy() != there {
+                        std::fs::rename(entry.path(), &displaced).unwrap();
+                        std::os::unix::fs::symlink(&displaced, entry.path()).unwrap();
+                    }
+                }
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        let state = state::load(&m.ctx).unwrap();
+        assert!(
+            state
+                .get(&Key::new(ProviderId::Desktop, "here"))
+                .is_some_and(|account| account.parked.is_none()),
+            "a link was recorded as the account's park"
+        );
+    }
+
+    /// The park can be replaced by a link after it was verified, while the app is asked about
+    /// once more: what is recorded must be the folder that was verified.
+    #[test]
+    fn a_park_that_became_a_link_after_it_was_verified_is_not_recorded() {
+        let m = desktop_machine("park-linked-after-verified");
+        let parks = paths::parks_dir(&m.ctx);
+        let there = m.there_park();
+        let displaced = m.support().with_file_name("displaced-verified-park");
+        let refused = fault::meanwhile(
+            "tree.park_verified",
             move || {
                 for entry in std::fs::read_dir(&parks).unwrap().flatten() {
                     if entry.file_name().to_string_lossy() != there {

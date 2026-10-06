@@ -205,15 +205,22 @@ fn note_ok(ctx: &Context) {
 /// process holds no gate: if the saved state grants another version, it was allowed after
 /// the read began, what failed is not what was allowed, and withdrawing it would undo the
 /// approval just given, so nothing is changed.
+///
+/// A request to turn live usage on has no item version yet: `began` is the state it started
+/// from, and one saved since is another request's, which this failure does not answer.
 fn needs_approval(
     ctx: &Context,
     _held: &MutexGuard<'_, ()>,
     read_for: Option<&ItemStamp>,
+    began: Option<&LiveUsage>,
     reason: &str,
 ) -> Stale {
     let locked = state_lock(ctx);
     let saved = load(ctx);
     if read_for.is_some() && saved.stamp.as_ref() != read_for {
+        return Stale::Interrupted;
+    }
+    if began.is_some_and(|began| !same_state(began, &saved)) {
         return Stale::Interrupted;
     }
     forget_key(ctx);
@@ -229,6 +236,16 @@ fn needs_approval(
         }
     }
     Stale::LiveUsageNeedsApproval
+}
+
+/// Whether two readings of the state are the one that was saved, leaving out the time of
+/// the last good reading, which is noted apart from it.
+fn same_state(a: &LiveUsage, b: &LiveUsage) -> bool {
+    let bare = |state: &LiveUsage| LiveUsage {
+        last_ok_at: None,
+        ..state.clone()
+    };
+    bare(a) == bare(b)
 }
 
 /// Turns live usage on: reads Claude's key the one way that may ask macOS's question, and
@@ -249,8 +266,11 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
             _ => None,
         },
     };
+    // The state this request starts from: a failure of it answers that state only.
+    let began = load(ctx);
     // Read first so a missing item is refused before macOS is made to ask about it.
     ctx.safe_storage().stamp(ctx).map_err(|e| refused_by(&e))?;
+    crate::fault::point("live_usage.enable_read");
     let password = match ctx.safe_storage().password(ctx, KeyRead::Approve) {
         Ok(password) => password,
         // Nothing was asked, so nothing was refused: approval stays as it was.
@@ -258,7 +278,7 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
             return Err(refused_by(&e));
         }
         Err(other) => {
-            needs_approval(ctx, &gate(), None, other.reason());
+            needs_approval(ctx, &gate(), None, Some(&began), other.reason());
             return Err(refused(other.reason()));
         }
     };
@@ -266,7 +286,7 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
     match proven(ctx, &key) {
         Ok(()) => {}
         Err(Unproven::WrongKey) => {
-            needs_approval(ctx, &gate(), None, "key_does_not_decrypt");
+            needs_approval(ctx, &gate(), None, Some(&began), "key_does_not_decrypt");
             return Err(refused("key_does_not_decrypt"));
         }
         // Nothing was refused, and nothing is known about the key either.
@@ -378,7 +398,13 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
         // The item allowed is gone, or macOS refuses even its attributes: what was allowed
         // can no longer be read, and asking again on every refresh would not change that.
         Err(e @ (KeyReadError::Missing | KeyReadError::Denied | KeyReadError::AuthFailed)) => {
-            return Err(needs_approval(ctx, &held, state.stamp.as_ref(), e.reason()));
+            return Err(needs_approval(
+                ctx,
+                &held,
+                state.stamp.as_ref(),
+                None,
+                e.reason(),
+            ));
         }
         // Nothing asks here, so a slow or odd answer is the keychain's moment, which says
         // nothing about whether Pitboard is allowed: nothing is recorded.
@@ -391,6 +417,7 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
             ctx,
             &held,
             state.stamp.as_ref(),
+            None,
             "item_changed",
         ));
     }
@@ -415,6 +442,7 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
             ctx,
             &held,
             state.stamp.as_ref(),
+            None,
             other.reason(),
         )),
     }
@@ -473,7 +501,7 @@ pub(crate) fn ask(
             return Stale::ParkUnreadable;
         }
         // The key that failed is the one read for `stamp`.
-        needs_approval(ctx, &gate(), Some(&stamp), "key_does_not_decrypt")
+        needs_approval(ctx, &gate(), Some(&stamp), None, "key_does_not_decrypt")
     };
     let table = ctx
         .host()
@@ -1134,6 +1162,30 @@ mod tests {
         assert_eq!(state.approval, Approval::Granted, "{state:?}");
     }
 
+    /// A request to turn live usage on that macOS refuses, while another request saved the
+    /// approval, must not take that approval back: the refusal answers the state it began from.
+    #[test]
+    fn a_refused_enable_does_not_withdraw_an_approval_saved_meanwhile() {
+        let d = desk("refused-enable", ScriptedSafeStorage::holding(PASSWORD));
+        d.keychain.refusing(KeyTrouble::Denied);
+        let other = d.ctx.clone();
+        let refused = crate::fault::meanwhile(
+            "live_usage.enable_read",
+            move || {
+                // Another request was allowed meanwhile, by a program with no gate of this one's.
+                let mut state = load(&other);
+                state.enabled = true;
+                state.approval = Approval::Granted;
+                state.stamp = Some(other.safe_storage().stamp(&other).unwrap());
+                save(&other, &state).unwrap();
+            },
+            || enable(&d.ctx),
+        );
+        assert!(refused.is_err(), "this request was refused");
+        let state = load(&d.ctx);
+        assert_eq!(state.approval, Approval::Granted, "{state:?}");
+    }
+
     /// A reading's success is noted by writing only its time, so a state another process
     /// saved while the reading was out is not written over by the one this process loaded.
     #[test]
@@ -1208,7 +1260,7 @@ mod tests {
         granted(&d);
         std::fs::remove_file(lock_file(&d.ctx)).unwrap();
         std::fs::create_dir(lock_file(&d.ctx)).unwrap();
-        let stale = needs_approval(&d.ctx, &gate(), None, "denied");
+        let stale = needs_approval(&d.ctx, &gate(), None, None, "denied");
         assert!(matches!(stale, Stale::LiveUsageNeedsApproval));
         assert!(
             waits_unsaved(&d.ctx, &load(&d.ctx)),
