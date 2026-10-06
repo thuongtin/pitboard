@@ -176,10 +176,21 @@ fn guard_managed(paths: &[std::path::PathBuf]) -> Result<(), DesktopCodeError> {
         }
         if let Some(env) = settings.get("env") {
             let env = env.as_object().ok_or(DesktopCodeError::ManagedSettings)?;
+            // A key that is present but inactive (`""`, `"0"`, `false`) changes nothing for
+            // the session, so only a value Claude Code would act on is refused.
+            let active = |name: &&str| {
+                env.get(*name).is_some_and(|value| {
+                    if crate::settings::OVERRIDING_ENV.contains(name) {
+                        crate::settings::env_value_is_set(value)
+                    } else {
+                        !value.as_str().is_some_and(|text| text.trim().is_empty())
+                    }
+                })
+            };
             if AUTH_ENV
                 .iter()
                 .chain(crate::settings::OVERRIDING_ENV.iter())
-                .any(|name| env.contains_key(*name))
+                .any(active)
             {
                 return Err(DesktopCodeError::ManagedSettings);
             }
@@ -662,6 +673,34 @@ exit 35
             json!({"env": {"EDITOR": "vi"}, "permissions": {}}).to_string(),
         )
         .unwrap();
-        assert!(guard_managed(&[path]).is_ok());
+        assert!(guard_managed(std::slice::from_ref(&path)).is_ok());
+    }
+
+    #[test]
+    fn managed_settings_that_name_an_authentication_key_without_setting_it_are_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed-settings.json");
+        std::fs::write(
+            &path,
+            json!({"env": {
+                "CLAUDE_CODE_USE_BEDROCK": "false",
+                "CLAUDE_CODE_USE_VERTEX": 0,
+                "CLAUDE_CODE_USE_FOUNDRY": false,
+                "ANTHROPIC_API_KEY": "",
+                "ANTHROPIC_BASE_URL": "  ",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(guard_managed(std::slice::from_ref(&path)).is_ok());
+        std::fs::write(
+            &path,
+            json!({"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_API_KEY": ""}}).to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            guard_managed(&[path]),
+            Err(DesktopCodeError::ManagedSettings)
+        ));
     }
 }
