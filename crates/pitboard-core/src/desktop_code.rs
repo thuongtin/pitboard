@@ -192,7 +192,10 @@ pub(crate) fn prepare(ctx: &Context, label: &str) -> Result<DesktopCodeSession, 
     // Read one coherent Pitboard snapshot without settling, moving or renewing anything.
     let _guard = crate::switch::exclusive(ctx)?;
     guard_managed(&crate::settings::managed_files())?;
-    if crate::switch::tree_interrupted(ctx).is_some() {
+    // An unreadable record of a switch may hide a login half moved, so it refuses too.
+    if crate::switch::tree_interrupted(ctx).is_some()
+        || crate::switch::tree_unreadable(ctx).is_some()
+    {
         return Err(DesktopCodeError::Switching);
     }
     let state = state::load(ctx)?;
@@ -426,6 +429,28 @@ mod tests {
         let session = prepare(&ctx, "there").expect("the live grant is the fresh one");
 
         assert_eq!(session.expires_at(), NOW + 3600);
+    }
+
+    /// A record of the switch that cannot be read is an interrupted switch too: the login may
+    /// be half moved, so no session is prepared from it.
+    #[test]
+    fn an_unreadable_desktop_journal_refuses_a_code_session() {
+        let m = desktop_machine("code-journal-unreadable");
+        m.crash_at("tree.live_parked").unwrap_err();
+        std::fs::write(
+            crate::provider::desktop::paths::desktop_home(&m.ctx).join("journal.json"),
+            b"{ this is not a journal",
+        )
+        .unwrap();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_api(ScriptedApi::new())
+            .with_scripted_safe_storage(ScriptedSafeStorage::holding("fixture-password"));
+        assert!(matches!(
+            prepare(&ctx, "there"),
+            Err(DesktopCodeError::Switching)
+        ));
     }
 
     /// A refusal the account's own error carries is the command's refusal: exit 3, which a

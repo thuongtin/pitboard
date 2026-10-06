@@ -386,6 +386,9 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
     let held = gate();
     let state = load(ctx);
     if !state.enabled {
+        // `disable` clears the memory of the process that ran it only. This one may have
+        // been running since before, so what it holds is let go where it sees live usage off.
+        forget_key(ctx);
         return Err(Stale::LiveUsageOff);
     }
     if state.approval != Approval::Granted || waits_unsaved(ctx, &state) {
@@ -958,6 +961,26 @@ mod tests {
         }
         assert_eq!(d.keychain.password_reads(), 2);
         assert_eq!(d.keychain.approval_reads(), 1);
+    }
+
+    /// Another process turns live usage off, and this one cannot clear its own memory: the
+    /// next reading here sees it off and lets go of the key it holds.
+    #[test]
+    fn a_key_kept_here_is_let_go_once_live_usage_is_seen_off() {
+        let d = desk("off-elsewhere", ScriptedSafeStorage::holding(PASSWORD));
+        enable(&d.ctx).expect("turned on");
+        ask(&d.ctx, &d.live(), &account(None), None).expect("asked");
+        assert!(cached(&d.ctx).is_some(), "the key is kept");
+
+        // What `pitboard desktop live-usage off` does from another process: it writes the
+        // state and clears only its own memory.
+        let mut state = load(&d.ctx);
+        state.enabled = false;
+        save(&d.ctx, &state).expect("saved");
+        assert!(cached(&d.ctx).is_some(), "this process has not looked yet");
+
+        assert!(matches!(key(&d.ctx), Err(Stale::LiveUsageOff)));
+        assert!(cached(&d.ctx).is_none(), "the key is let go");
     }
 
     /// The organization a reading was asked with is kept on the account, so a jar that

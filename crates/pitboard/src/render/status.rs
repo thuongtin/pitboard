@@ -292,9 +292,12 @@ pub fn human(report: &Report) -> String {
             ),
         );
     }
+    // A switch the crash left unfinished is settled first: a sign-in made now would be
+    // written over by it.
     if let Some(waiting) = report
         .desktop
         .as_ref()
+        .filter(|d| d.recovery_waiting.is_none())
         .and_then(|d| d.awaiting_sign_in.as_ref())
     {
         let parked = if waiting.from_label.is_empty() {
@@ -597,6 +600,26 @@ mod tests {
         let text = plain(&human(&report));
         assert!(text.contains("Claude Desktop is signed out"), "{text}");
         assert!(text.contains("pitboard enroll desktop/<label>"), "{text}");
+    }
+
+    /// A crash between a sign-out and its clean-up leaves both the waiting sign-in and the
+    /// interrupted switch in one report. The recovery comes first: signing in to another
+    /// account now would be written over by it.
+    #[test]
+    fn a_recovery_waiting_hides_the_instructions_to_sign_in() {
+        let mut report = desktop_report(vec![desktop("personal", false)]);
+        let desktop = report.desktop.as_mut().unwrap();
+        desktop.awaiting_sign_in = Some(pitboard_core::status::Awaiting {
+            from_label: "personal".into(),
+            started_at: NOW - 60,
+        });
+        desktop.recovery_waiting = Some(pitboard_core::status::InterruptedSwitch {
+            from: "desktop/personal".into(),
+            to: "desktop/work".into(),
+        });
+        let text = plain(&human(&report));
+        assert!(!text.contains("Claude Desktop is signed out"), "{text}");
+        assert!(!text.contains("pitboard enroll desktop/<label>"), "{text}");
     }
 
     /// Where Claude was already signed out nobody was parked, and the text and the JSON say
