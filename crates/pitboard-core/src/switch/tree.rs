@@ -75,7 +75,8 @@ pub(super) fn clear_awaiting(ctx: &Context) -> Result<()> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::RecoveryFailed { path, source }),
+        // Not a record of a switch: no file is half moved when it stays.
+        Err(source) => Err(Error::HomeUnwritable { path, source }),
     }
 }
 
@@ -188,8 +189,11 @@ pub(super) fn still_quiet(ctx: &Context, which: ProviderId) -> Result<()> {
 }
 
 /// The live data folder, made ready for a move: there, quiet, and on one volume with a
-/// private parks directory.
-fn prepare(ctx: &Context, which: ProviderId) -> Result<(&'static dyn TreeLogin, PathBuf)> {
+/// private parks directory, which is pinned where it was checked.
+fn prepare(
+    ctx: &Context,
+    which: ProviderId,
+) -> Result<(&'static dyn TreeLogin, PathBuf, Anchored)> {
     let tree = tree_of(which)?;
     let root = tree
         .root(ctx)
@@ -200,7 +204,7 @@ fn prepare(ctx: &Context, which: ProviderId) -> Result<(&'static dyn TreeLogin, 
     let parks = paths::parks_dir(ctx);
     moves::ensure_private_dir(&parks)?;
     moves::same_device(ctx, &root, &parks)?;
-    Ok((tree, root))
+    Ok((tree, root, Anchored::at(&parks)))
 }
 
 /// The inode at `path` in the data folder or a park, or why it could not be read.
@@ -579,14 +583,15 @@ pub(super) fn enroll_current(
 fn park_out(
     ctx: &Context,
     which: ProviderId,
-    root: &Anchored,
+    folders: [&Anchored; 2],
     state: &mut State,
     from_key: &Key,
     outgoing: &TreeIdentity,
     journal: &TreeJournal,
 ) -> Result<Park> {
-    let anchored_root = root;
-    let root = root.path.as_path();
+    // The data folder and the parks directory, pinned where they were checked.
+    let [anchored_root, parks_root] = folders;
+    let root = anchored_root.path.as_path();
     let name = journal
         .from_park
         .clone()
@@ -597,6 +602,9 @@ fn park_out(
         let path = path.to_path_buf();
         move |source| Error::HomeUnwritable { path, source }
     };
+    // The parks directory is the one that was checked: the park is made in it, not where a
+    // link put in its place points.
+    parks_root.still_there()?;
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&dir)
@@ -609,7 +617,7 @@ fn park_out(
     write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys.0)?;
 
     let dir_anchor = Anchored::at(&dir);
-    let anchors = [anchored_root, &dir_anchor];
+    let anchors = [anchored_root, parks_root, &dir_anchor];
     let mut moved = Vec::new();
     for item in journal.items.iter().filter(|i| i.from_inode.is_some()) {
         // Asked again before every move: the app may have been opened since the last.
@@ -740,7 +748,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     }
 
     // S0: nothing written yet.
-    let (tree, root) = prepare(ctx, which)?;
+    let (tree, root, parks_anchor) = prepare(ctx, which)?;
     let live = tree.identify(ctx, &root)?;
     let from_key = match identity::whose(&state, live.clone())? {
         LiveOwner::Enrolled(found) if found == *key => {
@@ -842,7 +850,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
         (Some(from_key), Some(outgoing)) => Some(park_out(
             ctx,
             which,
-            &root_anchor,
+            [&root_anchor, &parks_anchor],
             &mut state,
             from_key,
             outgoing,
@@ -979,7 +987,7 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
         ctx,
     } = settled;
     let ctx = &ctx;
-    let (tree, root) = prepare(ctx, which)?;
+    let (tree, root, parks_anchor) = prepare(ctx, which)?;
     let live = tree.identify(ctx, &root)?;
     let from_key = match identity::whose(&state, live.clone())? {
         LiveOwner::Nobody => {
@@ -1037,7 +1045,7 @@ pub fn sign_out(settled: Settled, which: ProviderId) -> Result<(Outcome, Vec<War
     let parked = park_out(
         ctx,
         which,
-        &root_anchor,
+        [&root_anchor, &parks_anchor],
         &mut state,
         &from_key,
         &outgoing,
@@ -1470,6 +1478,49 @@ mod tests {
             "nothing was moved to where the link points"
         );
         assert!(m.support().join("Cookies").exists(), "the login stays");
+    }
+
+    /// The parks directory can be replaced by a link between the check of it and the making of
+    /// the outgoing park in it.
+    #[test]
+    fn a_parks_directory_that_became_a_link_is_not_made_a_park_in() {
+        let m = desktop_machine("parks-linked");
+        let outside = m.support().with_file_name("outside-parks");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parks = paths::parks_dir(&m.ctx);
+        let linked = outside.clone();
+        let refused = fault::meanwhile(
+            "tree.journal_written",
+            move || {
+                let aside = parks.with_file_name("parks-displaced");
+                std::fs::rename(&parks, &aside).unwrap();
+                std::os::unix::fs::symlink(&linked, &parks).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the parks directory became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "no park was made where the link points"
+        );
+    }
+
+    /// The file that says an add is waiting is not a record of a switch: one that cannot be
+    /// removed leaves no file half moved, so it is not said as one.
+    #[test]
+    fn an_awaiting_file_that_cannot_be_removed_is_not_a_recovery_failure() {
+        let m = desktop_machine("awaiting-stays");
+        let file = awaiting_path(&m.ctx);
+        std::fs::create_dir_all(file.join("not-a-file")).unwrap();
+        let refused = clear_awaiting(&m.ctx).expect_err("a directory is not removed as a file");
+        assert!(
+            matches!(refused, Error::HomeUnwritable { .. }),
+            "{refused:?}"
+        );
     }
 
     #[test]

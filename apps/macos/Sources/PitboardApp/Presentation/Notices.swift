@@ -89,9 +89,9 @@ extension AppModel {
                     id: "live-usage", severity: .warning,
                     title: "Live usage for Claude is paused",
                     lines: [
-                        "macOS stopped letting Pitboard read Claude’s key, which can happen "
-                            + "after Claude updates. Until it is allowed again, Claude "
-                            + "Desktop’s numbers come from Claude’s own history."
+                        "macOS stopped letting Pitboard read Claude’s key. Until it is "
+                            + "allowed again, Claude Desktop’s numbers come from Claude’s own "
+                            + "history."
                     ],
                     actions: [.allowLiveUsage]))
         }

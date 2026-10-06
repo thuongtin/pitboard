@@ -70,7 +70,7 @@ For each exit status, see [Exit codes](/reference/commands#exit-codes). In the t
 | `recovery_undetermined` | 1 | An earlier switch was interrupted, and Pitboard cannot yet tell whether it finished. Nothing changed. | For Claude Desktop, keep Claude closed and run `pitboard doctor` to see where each item is; `pitboard abandon` keeps every item where it is. Otherwise, run `claude` or `codex` once, then try again. If it still fails, run `pitboard abandon`, which gives up on the switch and keeps every login. In the app, the notice **An interrupted switch is waiting** has a **Give Up** button that does the same. See [Recover after a crash, a restore or a move](/troubleshooting/recovery#an-interrupted-switch-cannot-be-finished). |
 | `recovery_elsewhere` | 1 | `CLAUDE_CONFIG_DIR` or `CODEX_HOME` has changed since the interrupted switch, so Pitboard reads another folder and cannot tell what that switch did. Nothing changed. | Set the variable back and try again, or run `pitboard abandon`. |
 | `recovery_waiting` | 1 | An earlier Claude Desktop switch was interrupted, and Claude is open, so Pitboard cannot finish it yet. Nothing changed. Claude Code and Codex commands are not held up by it. | Quit Claude with Command-Q, then run the command again. |
-| `recovery_failed` | 1 | Pitboard could not read or write its record of a switch in progress, `journal.json`. | Check that you can read and write the file the message names. |
+| `recovery_failed` | 1 | Pitboard could not read or remove its record of a switch in progress, `journal.json`, or found one it must not write over. | Check that you can read and write the file the message names. |
 | `recovery_record_corrupt` | 3 | The record of the interrupted switch is damaged. Nothing changed. | Check that `pitboard status` shows the account you expect in use, then delete the file the message names. |
 
 ## The Pitboard directory
@@ -85,7 +85,7 @@ For each exit status, see [Exit codes](/reference/commands#exit-codes). In the t
 | `state_names_unknown_tool` | 1 | The account list has an account for a tool this Pitboard does not know, so a newer Pitboard wrote it. | [Update Pitboard](/install#update-pitboard). |
 | `state_wrong_machine` | 1 | The account list was written on another computer, so Pitboard does not use it. Only `pitboard adopt` takes it over. | Run `pitboard adopt`, then sign in to each account again. See [Recover after a crash, a restore or a move](/troubleshooting/recovery#the-pitboard-directory-came-from-another-computer). |
 | `state_write_failed` | 1 | Pitboard could not save its account list. | Check that you can write to the file the message names. |
-| `home_unwritable` | 1 | Pitboard could not write to its directory, a lock file in it, or the renewal schedule's files. | Check that you can write to the path the message names. |
+| `home_unwritable` | 1 | Pitboard could not write to its directory, a lock file in it, the record of a switch before it starts, or the renewal schedule's files. | Check that you can write to the path the message names. |
 
 ## Claude Code and Codex files
 

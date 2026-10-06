@@ -244,8 +244,10 @@ pub(super) fn write(ctx: &Context, journal: &TreeJournal) -> Result<()> {
         });
     }
     let body = serde_json::to_vec_pretty(journal).expect("a record of Pitboard's serialises");
+    // Nothing is recorded and nothing has moved, so this is a home that cannot be written,
+    // not a record that cannot be settled.
     atomic::write(&path, &body, atomic::Perms::Secret)
-        .map_err(|source| Error::RecoveryFailed { path, source })
+        .map_err(|source| Error::HomeUnwritable { path, source })
 }
 
 /// The run reached a state the state file fully describes. A record that stays is replayed
@@ -511,6 +513,14 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         if let Some(original) = original {
             tree::still_quiet(ctx, which)?;
             if config::read_keys(&config)? != original {
+                // The items are home, and a session written over the jar in place keeps
+                // their inodes: the keys go back only under the session they belong to.
+                let session = identity::session_of(ctx, &root)?;
+                if session.map(|found| found.fingerprint) != journal.from_fingerprint {
+                    return Err(undetermined(
+                        "the session in Claude is not the one the switch began from".into(),
+                    ));
+                }
                 config::splice(&config, &original)?;
             }
         }
@@ -1091,6 +1101,60 @@ mod tests {
                     .contains("cache-made-by-claude")),
             "the keys of the login Claude made are set aside"
         );
+    }
+
+    /// A record that could not be written is a home that cannot be written: nothing moved and
+    /// nothing is recorded, so it is not said to be a recovery that failed.
+    #[test]
+    fn a_record_that_cannot_be_written_is_not_a_recovery_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let m = desktop_machine("record-unwritable");
+        let home = paths::desktop_home(&m.ctx);
+        let before = std::fs::metadata(&home).unwrap().permissions();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let journal = TreeJournal::new(&m.ctx, ProviderId::Claude, &m.support()).unwrap();
+        let refused = write(&m.ctx, &journal);
+        std::fs::set_permissions(&home, before).unwrap();
+        let refused = refused.expect_err("the folder cannot be written");
+        assert!(
+            matches!(refused, Error::HomeUnwritable { .. }),
+            "{refused:?}"
+        );
+        assert!(pending(&m.ctx).is_none(), "no record was left");
+    }
+
+    /// A crash before the first item moves leaves every inode as recorded. Claude can then
+    /// sign in to another account by writing the jar in place, and its keys are not written
+    /// over with the outgoing account's.
+    #[test]
+    fn a_login_written_in_place_before_the_first_move_is_not_given_the_original_keys() {
+        let m = desktop_machine("rewritten-before-move");
+        assert_eq!(
+            m.crash_at("tree.park_move_checked").unwrap_err(),
+            "tree.park_move_checked"
+        );
+        let cookies = m.support().join("Cookies");
+        std::fs::write(&cookies, b"made by Claude").unwrap();
+        m.mem.plant_cookies(&cookies, jar("v10third", NOW + 86_400));
+        let config = m.support().join("config.json");
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        written["lastKnownAccountUuid"] = serde_json::json!("third");
+        written["oauth:tokenCache"] = serde_json::json!("cache-third");
+        std::fs::write(&config, written.to_string()).unwrap();
+        let before = std::fs::read(&config).unwrap();
+
+        let refused = m.recover().expect_err("another account signed in");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&config).unwrap(),
+            before,
+            "the other account's keys are left as they are"
+        );
+        assert!(pending(&m.ctx).is_some(), "the record is kept");
     }
 
     /// A jar rewritten in place keeps its inode, so the inode alone cannot say the session in

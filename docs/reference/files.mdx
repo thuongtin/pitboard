@@ -53,7 +53,7 @@ A Claude Desktop parked login is a folder, not a keychain item. Pitboard keeps i
 
 | Path in `~/.pitboard/desktop/` | Holds |
 | --- | --- |
-| `parks/pitboard-tree-<account uuid>-<time>/` | One parked login: the items moved out of Claude's data folder, `config-keys.json` with the three keys Pitboard moves from Claude's `config.json`, and `manifest.json` naming the account, a hash of its session and the items. Deleted only by `pitboard forget` and `pitboard uninstall`. |
+| `parks/pitboard-tree-<account uuid>-<time>/` | One parked login: the items moved out of Claude's data folder, `config-keys.json` with the three keys Pitboard moves from Claude's `config.json`, and `manifest.json` naming the account, a hash of its session and the items. Deleted by `pitboard forget`, `pitboard uninstall`, and a switch to that account, which uses it up. |
 | `journal.json` | The record of a Claude Desktop switch while it runs. It names items, never their contents. The next change Pitboard makes while Claude is closed finishes or undoes it. |
 | `strays/<time>/` | Items found in Claude's data folder that belonged to neither account, such as what Claude made while signed out. Pitboard never deletes them, and `pitboard uninstall` keeps them. |
 | `awaiting.json` | The account `pitboard use desktop --signed-out` parked, and when, until the next Claude Desktop enrolment |

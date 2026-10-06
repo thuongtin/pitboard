@@ -74,8 +74,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         content.title = "Live usage for Claude is paused"
         content.body =
-            "macOS stopped letting Pitboard read Claude’s key, which can happen after Claude "
-            + "updates. Open Pitboard to allow it again."
+            "macOS stopped letting Pitboard read Claude’s key. Open Pitboard to allow it "
+            + "again."
         let request = UNNotificationRequest(
             identifier: Self.liveUsagePaused, content: content, trigger: nil)
         Task {
