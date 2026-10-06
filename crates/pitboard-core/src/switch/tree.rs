@@ -70,8 +70,29 @@ pub(super) fn write_awaiting(ctx: &Context, awaiting: &Awaiting) -> Result<()> {
     write_secret_json(&awaiting_path(ctx), awaiting)
 }
 
-fn clear_awaiting(ctx: &Context) {
-    let _ = std::fs::remove_file(awaiting_path(ctx));
+pub(super) fn clear_awaiting(ctx: &Context) -> Result<()> {
+    let path = awaiting_path(ctx);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::RecoveryFailed { path, source }),
+    }
+}
+
+/// Follows a rename of the account a wait would put back: the wait names it by its label,
+/// and an add reopened after the rename would otherwise offer to put back one that is no
+/// longer there. A wait that names another account, or nobody, is left as it is.
+pub(super) fn rename_awaiting(ctx: &Context, from: &str, to: &str) -> Result<()> {
+    match awaiting_sign_in(ctx) {
+        Some(wait) if wait.from_label == from => write_awaiting(
+            ctx,
+            &Awaiting {
+                from_label: to.to_string(),
+                ..wait
+            },
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// The tool's folder login, or a usage error for a tool whose login is a credential.
@@ -441,7 +462,7 @@ pub(super) fn enroll_current(
     }
     state.set_active(which, Some(key.label.clone()));
     state::save(ctx, state)?;
-    clear_awaiting(ctx);
+    clear_awaiting(ctx)?;
     let pending = purge(ctx, state);
     warnings.extend((pending > 0).then_some(Warning::ParksPendingRemoval(pending)));
     Ok((enrolled, warnings))
@@ -586,7 +607,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
             )
         {
             // Signed in as this account, so a sign-out waiting for one is over.
-            clear_awaiting(ctx);
+            clear_awaiting(ctx)?;
             return Ok((
                 Outcome::AlreadyActive {
                     label: state.typed(key),
@@ -616,7 +637,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
                 state.used(key, ctx.now());
                 state::save(ctx, &state)?;
             }
-            clear_awaiting(ctx);
+            clear_awaiting(ctx)?;
             if old.is_some() {
                 let pending = purge(ctx, &mut state);
                 warnings.extend((pending > 0).then_some(Warning::ParksPendingRemoval(pending)));
@@ -772,7 +793,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     // S12: done, and the incoming park's leftovers deleted. Somebody is signed in again, so
     // a sign-out waiting for one is over.
     tree_journal::clear(ctx)?;
-    clear_awaiting(ctx);
+    clear_awaiting(ctx)?;
     let pending = purge(ctx, &mut state);
 
     let warnings = (strays > 0)
@@ -1734,11 +1755,44 @@ mod tests {
 
     /// An add begun while Claude is already signed out still waits for a sign-in, with
     /// nobody to put back, so a restart of the app can find it and carry on.
+    /// A wait that is still on disk after the sign-in it waited for would reopen a finished
+    /// add at the next launch, so a record that cannot be removed is said, not dropped.
+    #[test]
+    fn an_awaiting_record_that_cannot_be_removed_is_an_error() {
+        let m = desktop_machine("awaiting-stuck");
+        std::fs::create_dir_all(awaiting_path(&m.ctx).join("not-a-file")).unwrap();
+        assert!(clear_awaiting(&m.ctx).is_err());
+        std::fs::remove_dir_all(awaiting_path(&m.ctx)).unwrap();
+        clear_awaiting(&m.ctx).expect("a record that is not there is already cleared");
+    }
+
+    /// A parked account renamed while an add waits is still the one to put back, under its
+    /// new name: the old one is in no account's name any more.
+    #[test]
+    fn renaming_the_account_an_add_waits_to_put_back_renames_it_in_the_wait() {
+        let m = desktop_machine("rename-awaiting");
+        signing_out(&m).expect("signed out");
+        let (settled, _) = super::super::settle(&m.ctx, Some(ProviderId::Desktop)).unwrap();
+        super::super::rename(settled, &m.key("here"), "renamed").expect("renamed");
+        assert_eq!(
+            awaiting_sign_in(&m.ctx).map(|a| a.from_label),
+            Some("renamed".to_string())
+        );
+        // An account the wait does not name leaves it as it is.
+        let (settled, _) = super::super::settle(&m.ctx, Some(ProviderId::Desktop)).unwrap();
+        m.there_park();
+        super::super::rename(settled, &m.key("there"), "elsewhere").expect("renamed");
+        assert_eq!(
+            awaiting_sign_in(&m.ctx).map(|a| a.from_label),
+            Some("renamed".to_string())
+        );
+    }
+
     #[test]
     fn signing_out_while_signed_out_still_waits_for_a_sign_in() {
         let m = desktop_machine("sign-out-twice");
         signing_out(&m).expect("signed out");
-        clear_awaiting(&m.ctx);
+        clear_awaiting(&m.ctx).unwrap();
         assert_eq!(awaiting_sign_in(&m.ctx), None);
 
         let (again, _) = signing_out(&m).expect("nothing to move");

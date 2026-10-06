@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import PitboardKit
 import PitboardLinkTarget
@@ -34,7 +35,7 @@ public struct Dependencies {
     /// This machine, as the person running the app has it.
     public static func live() -> Dependencies {
         Dependencies(
-            core: PitboardService.forThisApp(),
+            core: PitboardService.forThisApp(environment: environmentNamingClaudeApp()),
             defaults: .standard,
             loginItem: MainAppLoginItem(),
             appControl: WorkspaceAppControl(),
@@ -43,6 +44,25 @@ public struct Dependencies {
             watching: true,
             web: .live(defaults: .standard),
             linkScheme: LinkTarget.scheme(in: .main) ?? "pitboard")
+    }
+
+    /// The environment the core is started with, with the Claude app macOS knows of in it
+    /// where nobody has named one. The core looks in /Applications otherwise, and Claude
+    /// installed in ~/Applications or anywhere else would read there as not installed, its
+    /// accounts left out of the app though Pitboard can quit and open it.
+    private static func environmentNamingClaudeApp(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment,
+        installed: (String) -> URL? = {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
+        }
+    ) -> [String: String] {
+        var named = environment
+        if named["PITBOARD_CLAUDE_DESKTOP_APP"]?.isEmpty ?? true,
+            let app = installed(AppModel.claudeApp.bundleID)
+        {
+            named["PITBOARD_CLAUDE_DESKTOP_APP"] = app.path
+        }
+        return named
     }
 
     /// The world this launch runs in: `live()`, unless this is a debug build started with

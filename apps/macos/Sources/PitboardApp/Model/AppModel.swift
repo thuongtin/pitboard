@@ -1234,7 +1234,7 @@ final class SigningIn {
 extension AppModel {
     /// Claude as the core names it, when nothing says otherwise: the core names the app only
     /// while it can see it running.
-    private static let claudeApp = (bundleID: "com.anthropic.claudefordesktop", name: "Claude")
+    static let claudeApp = (bundleID: "com.anthropic.claudefordesktop", name: "Claude")
 
     /// Whether Settings has anything to say about Claude Desktop: it is installed here, or
     /// has an account here.

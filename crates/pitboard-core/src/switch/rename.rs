@@ -1,6 +1,7 @@
 //! Changing the label an account is enrolled under.
 
-use super::{Result, Settled};
+use super::{Result, Settled, tree};
+use crate::provider::ProviderId;
 use crate::state::{self, Key};
 
 /// Returns the account's email.
@@ -12,5 +13,8 @@ pub fn rename(settled: Settled, from: &Key, to: &str) -> Result<String> {
     } = settled;
     let email = state.relabel(from, to)?.email.clone();
     state::save(&ctx, &state)?;
+    if from.provider == ProviderId::Desktop {
+        tree::rename_awaiting(&ctx, &from.label, to)?;
+    }
     Ok(email)
 }

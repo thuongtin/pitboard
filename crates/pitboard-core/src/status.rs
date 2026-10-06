@@ -512,18 +512,25 @@ fn slot_of(ctx: &Context) -> Slot {
 /// of it and asks its service nothing: somebody who uses Pitboard for Claude Code and also
 /// has Codex installed has not asked for their Codex login to be read, or sent to OpenAI on
 /// every refresh of a menu bar.
-fn in_use(state: &State) -> Vec<ProviderId> {
+///
+/// Claude Desktop is the one exception: where the app is installed its own folder is read,
+/// since an app whose first account cannot be seen cannot be told to name it. That read
+/// stays on this Mac, in the folder's cookie jar, and nobody is asked about what it finds
+/// unless somebody has turned live usage on.
+fn in_use(ctx: &Context, state: &State) -> Vec<ProviderId> {
     ProviderId::ALL
         .iter()
         .copied()
         .filter(|&which| {
-            which == crate::label::DEFAULT || state.accounts.iter().any(|a| a.provider() == which)
+            which == crate::label::DEFAULT
+                || state.accounts.iter().any(|a| a.provider() == which)
+                || (which == ProviderId::Desktop && ctx.desktop_installed())
         })
         .collect()
 }
 
 pub fn gather_offline(ctx: &Context, state: &State) -> Report {
-    let tools = in_use(state);
+    let tools = in_use(ctx, state);
     let recovery = crate::switch::tree_interrupted(ctx);
     // A folder login is never asked offline either, and why says more than "not asked":
     // asking is off, or the folder may hold either account's items.
@@ -935,7 +942,7 @@ pub fn gather(ctx: &Context, state: &State, fresh: bool) -> Report {
     // Each tool's live login, whole, or why it could not be read. Not a token out of it:
     // what a usage call needs is not the same everywhere, and pulling one field out here
     // would decide that for all of them.
-    let tools = in_use(state);
+    let tools = in_use(ctx, state);
     let recovery = crate::switch::tree_interrupted(ctx);
     let live_documents: Vec<(ProviderId, Result<Option<Value>, ProviderError>)> = tools
         .iter()
@@ -2720,6 +2727,49 @@ mod tests {
         assert!(matches!(login.usage, Some(Err(_))));
         assert!(learned.is_none());
         assert_eq!(api.calls(), 0, "nobody was asked");
+    }
+
+    /// Claude Desktop is opted into by enrolling an account, but where the app is installed
+    /// and signed in, the login has to be seen to be named: nothing else lets the first
+    /// account be added. It is read from the folder alone, and nobody is asked about it.
+    #[test]
+    fn a_desktop_login_nobody_enrolled_is_seen_where_the_app_is_installed() {
+        let m = crate::switch::harness::desktop_machine("status-first-desktop");
+        let app = m.support().with_file_name("Claude.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "").unwrap();
+        let api = ScriptedApi::new();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_desktop_app(app.to_string_lossy().into())
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding())
+            .with_scripted_api(Arc::clone(&api));
+        let nobody = State::default();
+
+        let report = gather(&ctx, &nobody, false);
+        let row = report
+            .rows
+            .iter()
+            .find(|r| r.provider == ProviderId::Desktop)
+            .expect("the login signed in to the app");
+        assert!(row.signed_in);
+        assert_eq!(row.label, None);
+        assert_eq!(api.calls(), 0, "nobody was asked");
+
+        // Without the app there is nothing of it to read, as before.
+        let absent = ctx.clone().with_desktop_app(
+            m.support()
+                .with_file_name("Gone.app")
+                .to_string_lossy()
+                .into(),
+        );
+        assert!(
+            gather(&absent, &nobody, false)
+                .rows
+                .iter()
+                .all(|r| r.provider != ProviderId::Desktop)
+        );
     }
 
     /// A reading remembered under the app's usage key comes back with the account's own id,

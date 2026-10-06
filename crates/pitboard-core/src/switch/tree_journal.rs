@@ -844,6 +844,38 @@ mod tests {
         assert_eq!(m.inodes(), during);
     }
 
+    /// A home copied from another Mac while a Desktop switch was unfinished: its record names
+    /// that Mac's volume and parks, so adopting the home throws it away, with the wait that
+    /// came with it, instead of leaving every later change to refuse.
+    #[test]
+    fn adopting_a_home_drops_the_unfinished_switch_it_brought() {
+        let m = desktop_machine("adopt-journal");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        assert!(pending(&m.ctx).is_some());
+        tree::write_awaiting(
+            &m.ctx,
+            &tree::Awaiting {
+                from_label: "here".into(),
+                started_at: m.ctx.now(),
+            },
+        )
+        .unwrap();
+        let record = crate::home::dir(&m.ctx).join("state.json");
+        let mut whole: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        whole["machine"] = "a hash from another computer".into();
+        std::fs::write(&record, serde_json::to_vec(&whole).unwrap()).unwrap();
+
+        super::super::adopt(&m.ctx)
+            .expect("adopting")
+            .expect("there was work to do");
+        assert!(pending(&m.ctx).is_none(), "the record is gone");
+        assert_eq!(tree::awaiting_sign_in(&m.ctx), None);
+    }
+
     /// A record that lost an item, or lists one twice, would have recovery neither move nor
     /// check that item, and then purge it with the park: it is corrupt, not recovered.
     #[test]
