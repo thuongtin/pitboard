@@ -365,6 +365,20 @@ pub(crate) fn check_park(
         if !inside || std::fs::symlink_metadata(dir.join(item)).is_err() {
             return Err(corrupt("an item it holds is missing"));
         }
+        // A link in the middle of the way would have the move take what it points at, which
+        // is somewhere else. The item itself may be one: it is moved as it is.
+        let mut walked = dir.clone();
+        for part in Path::new(item)
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+        {
+            walked.push(part);
+            if std::fs::symlink_metadata(&walked).is_ok_and(|found| found.file_type().is_symlink())
+            {
+                return Err(corrupt("an item it holds is behind a link"));
+            }
+        }
     }
     match identity::session_of(ctx, &dir)? {
         Some(session)
@@ -1658,6 +1672,37 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(m.inodes(), before);
+    }
+
+    /// A nested item whose parent folder in the park is a link would be moved out of
+    /// wherever the link points, so the park is refused before anything moves.
+    #[test]
+    fn a_park_whose_item_sits_behind_a_symlinked_folder_is_refused() {
+        let m = desktop_machine("symlinked-parent");
+        let dir = paths::parks_dir(&m.ctx).join(m.there_park());
+        let mut manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILE)).unwrap()).unwrap();
+        manifest.items.push("Nested/inner".into());
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let outside = dir.with_file_name("outside-the-park");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("inner"), "not the park's").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("Nested")).unwrap();
+        let before = m.inodes();
+        let refused = switch_to(&m, "there").expect_err("a linked parent");
+        assert!(
+            matches!(refused, Error::ParkedCredentialCorrupt { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(m.inodes(), before);
+        assert!(
+            outside.join("inner").exists(),
+            "what the link points at stays"
+        );
     }
 
     #[test]

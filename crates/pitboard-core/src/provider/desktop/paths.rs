@@ -67,7 +67,9 @@ pub(crate) const PARK_PREFIX: &str = "pitboard-tree-";
 /// nowhere unless somebody says.
 pub(crate) fn support_dir(ctx: &Context) -> Option<PathBuf> {
     if let Some(dir) = &ctx.desktop_dir {
-        return Some(dir.clone());
+        // Absolute, since a journal names the folder and a later process may start in
+        // another directory. One that cannot be made absolute is left as it was said.
+        return Some(std::path::absolute(dir).unwrap_or_else(|_| dir.clone()));
     }
     crate::host::OS
         .claude_desktop_data()
@@ -142,5 +144,16 @@ mod tests {
             history_file(&ctx),
             Some(PathBuf::from("/s/Claude/plan-usage-history.json"))
         );
+    }
+
+    /// A journal names the data folder it ran in, and a later process may start somewhere
+    /// else, so the folder is always named from the root: a relative spelling would read as
+    /// the same folder from two directories that are not.
+    #[test]
+    fn a_relative_data_folder_is_named_from_the_root() {
+        let ctx = Context::new(PathBuf::from("/home/x")).with_desktop_dir("scratch/Claude".into());
+        let named = support_dir(&ctx).expect("a folder");
+        assert!(named.is_absolute(), "{named:?}");
+        assert!(named.ends_with("scratch/Claude"), "{named:?}");
     }
 }

@@ -391,6 +391,21 @@ private func desktopMachine(
     #expect(model.presentedFailure?.warnings.map(\.code) == ["switch_unfinished"])
 }
 
+/// A record the core cannot settle before a switch is a change left partway too, though the
+/// refusal carries no warning: Claude, quit for the switch, is not opened on it.
+@MainActor
+@Test func aRecordTheCoreCannotSettleLeavesClaudeClosed() async throws {
+    for code in ["recovery_undetermined", "recovery_record_corrupt"] {
+        let (model, core, apps, trail) = desktopMachine()
+        core.switchFailing = PitboardError.Failed(
+            code: code, cause: nil, message: "an earlier switch cannot be settled",
+            warnings: [])
+        await model.switchAsked(to: "desktop/work")
+        #expect(trail.steps == ["quit \(claudeApp)"], "\(code)")
+        #expect(apps.running.isEmpty, "\(code)")
+    }
+}
+
 /// The same holds for an add's sign-out, and for Claude opening partway, which the core
 /// says with a code of its own: it is not opened again by Pitboard either.
 @MainActor
