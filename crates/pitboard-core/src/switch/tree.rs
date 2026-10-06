@@ -235,6 +235,35 @@ pub(super) fn inode_of_live(root: &Path, item: &str) -> Result<Option<u64>> {
     inode_at(&root.join(item))
 }
 
+/// A folder a run decides its steps under, with where it really was then.
+pub(super) struct Anchored {
+    pub(super) path: PathBuf,
+    real: Option<PathBuf>,
+}
+
+impl Anchored {
+    pub(super) fn at(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            real: std::fs::canonicalize(path).ok(),
+        }
+    }
+
+    /// Refuses a folder that is somewhere else now, as a link put in its place is.
+    pub(super) fn still_there(&self) -> Result<()> {
+        if std::fs::canonicalize(&self.path).ok() == self.real {
+            return Ok(());
+        }
+        Err(Error::DesktopDataInaccessible {
+            path: self.path.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the folder is not where it was when the steps were decided",
+            ),
+        })
+    }
+}
+
 /// One item moved by one rename. A move made and then not synced is an error too, though
 /// the item is where it was moved to: it is not on disk yet, so the run stops with its
 /// record, which settles by where each item is, rather than carry on to delete the record
@@ -563,6 +592,7 @@ fn park_out(
     let keys = config::read_keys(&paths::config_file(root))?;
     write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys.0)?;
 
+    let anchors = [Anchored::at(root), Anchored::at(&dir)];
     let mut moved = Vec::new();
     for item in journal.items.iter().filter(|i| i.from_inode.is_some()) {
         // Asked again before every move: the app may have been opened since the last.
@@ -570,6 +600,10 @@ fn park_out(
         // A folder on the way may have become a link since the record was made, and a
         // rename follows it.
         inode_of_live(root, &item.path)?;
+        fault::point("tree.park_move_checked");
+        // The folders themselves are looked at again: a link put in the place of either is
+        // not on the way to an item, and a rename follows it.
+        anchors.iter().try_for_each(Anchored::still_there)?;
         move_item(&root.join(&item.path), &dir.join(&item.path))?;
         moved.push(item.path.clone());
         if moved.len() == 1 {
@@ -793,10 +827,13 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     // Everything this switch sets aside shares one directory under the strays directory.
     let mut set_aside = moves::Strays::new();
     let mut installed = 0;
+    let anchors = [Anchored::at(&root), Anchored::at(&incoming)];
     for item in &journal.items {
         still_quiet(ctx, which)?;
         let there = root.join(&item.path);
         inode_of_live(&root, &item.path)?;
+        fault::point("tree.install_checked");
+        anchors.iter().try_for_each(Anchored::still_there)?;
         if inode_at(&there)?.is_some() {
             set_aside.set_aside(ctx, &there)?;
             strays += 1;
@@ -805,6 +842,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
             // The park was checked before the record was written; a folder inside it that
             // became a link since would have the rename take what the link points at.
             inode_of_live(&incoming, &item.path)?;
+            anchors.iter().try_for_each(Anchored::still_there)?;
             move_item(&incoming.join(&item.path), &there)?;
             installed += 1;
             if installed == 1 {
@@ -1174,6 +1212,60 @@ mod tests {
                 .to_string()
                 .contains("could not list what is running"),
             "{refused}"
+        );
+    }
+
+    /// The data folder or the park can become a link between the look at the way to an item
+    /// and the rename, which then takes the item to or from where the link points.
+    #[test]
+    fn a_park_that_became_a_link_before_a_move_is_not_moved_into() {
+        let m = desktop_machine("park-linked-midway");
+        let outside = m.support().with_file_name("outside-park");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parks = paths::parks_dir(&m.ctx);
+        let there = m.there_park();
+        let (linked, in_parks) = (outside.clone(), parks.clone());
+        let refused = fault::meanwhile(
+            "tree.park_move_checked",
+            move || {
+                for entry in std::fs::read_dir(&in_parks).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy() != there {
+                        std::fs::remove_dir_all(entry.path()).unwrap();
+                        std::os::unix::fs::symlink(&linked, entry.path()).unwrap();
+                    }
+                }
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the new park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was moved to where the link points"
+        );
+    }
+
+    #[test]
+    fn an_incoming_park_that_became_a_link_before_a_move_is_not_moved_out_of() {
+        let m = desktop_machine("incoming-linked-midway");
+        let aside = m.support().with_file_name("incoming-aside");
+        let incoming = paths::parks_dir(&m.ctx).join(m.there_park());
+        let (moved_to, path) = (aside.clone(), incoming.clone());
+        let refused = fault::meanwhile(
+            "tree.install_checked",
+            move || {
+                std::fs::rename(&path, &moved_to).unwrap();
+                std::os::unix::fs::symlink(&moved_to, &path).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the incoming park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
         );
     }
 

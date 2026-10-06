@@ -357,6 +357,9 @@ directory of mode 0700 whose files are 0600:
   enrolment.
 - `live-usage.json`: whether live usage is on, and whether macOS let Pitboard read Claude's
   key. It never holds the key.
+- `live-usage-ok.json`: when the last reading succeeded, and only that. It is a file of its
+  own so a refresh, which writes it every time, never rewrites `live-usage.json` over what
+  another process saved there.
 
 ## Tool registers
 

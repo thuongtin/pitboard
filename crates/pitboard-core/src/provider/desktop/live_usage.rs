@@ -110,16 +110,32 @@ pub(crate) fn state_file(ctx: &Context) -> PathBuf {
     desktop_home(ctx).join("live-usage.json")
 }
 
+/// When the last reading succeeded, kept apart from the state: every refresh writes it,
+/// and the state is written by whoever turns live usage on or off or withdraws its
+/// approval, from other processes that share no gate with this one. A refresh that rewrote
+/// the state to note a time would write over what one of them saved in between.
+fn ok_file(ctx: &Context) -> PathBuf {
+    desktop_home(ctx).join("live-usage-ok.json")
+}
+
 /// The state as last saved. Off, and never asked about, where there is none or it cannot
 /// be read, so a damaged file never turns live usage on.
 pub(crate) fn load(ctx: &Context) -> LiveUsage {
-    std::fs::read(state_file(ctx))
+    let mut state: LiveUsage = std::fs::read(state_file(ctx))
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let noted = std::fs::read(ok_file(ctx))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<i64>(&raw).ok());
+    if state.enabled && noted.is_some() {
+        state.last_ok_at = noted;
+    }
+    state
 }
 
-/// Saves the state, readable by its owner alone.
+/// Saves the state, readable by its owner alone. The time of the last good reading is not
+/// part of it: see [`ok_file`].
 pub(crate) fn save(ctx: &Context, state: &LiveUsage) -> Result<(), Error> {
     let path = state_file(ctx);
     let failed = |source| Error::StateWriteFailed {
@@ -127,16 +143,47 @@ pub(crate) fn save(ctx: &Context, state: &LiveUsage) -> Result<(), Error> {
         source,
     };
     crate::host::fs::create_private_dir(&desktop_home(ctx)).map_err(failed)?;
-    let body = serde_json::to_vec_pretty(state).map_err(|e| failed(std::io::Error::other(e)))?;
+    let kept = LiveUsage {
+        last_ok_at: None,
+        ..state.clone()
+    };
+    let body = serde_json::to_vec_pretty(&kept).map_err(|e| failed(std::io::Error::other(e)))?;
     crate::atomic::write(&path, &body, crate::atomic::Perms::Secret).map_err(failed)
+}
+
+/// Notes that a reading just succeeded, where the state allows one. Only the time is
+/// written, so a state another process saved while the reading was out is left as it is.
+fn note_ok(ctx: &Context) {
+    let _held = gate();
+    let state = load(ctx);
+    if !(state.enabled && state.approval == Approval::Granted) {
+        return;
+    }
+    crate::fault::point("live_usage.ok_noting");
+    let path = ok_file(ctx);
+    let body = serde_json::to_vec(&ctx.now()).expect("a number serialises");
+    let _ = crate::atomic::write(&path, &body, crate::atomic::Perms::Secret);
 }
 
 /// Records that live usage waits to be allowed again, for `reason`, and forgets the key.
 /// Returns what a reading says in the meantime. Called with the gate held, so the state
-/// it changes is the one saved last.
-fn needs_approval(ctx: &Context, _held: &MutexGuard<'_, ()>, reason: &str) -> Stale {
-    forget_key(ctx);
+/// it changes is the one saved last in this process.
+///
+/// `read_for` is the item version the failure belongs to, where there is one. Another
+/// process holds no gate: if the saved state grants another version, it was allowed after
+/// the read began, what failed is not what was allowed, and withdrawing it would undo the
+/// approval just given, so nothing is changed.
+fn needs_approval(
+    ctx: &Context,
+    _held: &MutexGuard<'_, ()>,
+    read_for: Option<&ItemStamp>,
+    reason: &str,
+) -> Stale {
     let saved = load(ctx);
+    if read_for.is_some() && saved.stamp.as_ref() != read_for {
+        return Stale::Interrupted;
+    }
+    forget_key(ctx);
     if saved.approval != Approval::NeedsApproval || saved.reason.as_deref() != Some(reason) {
         let mut state = saved.clone();
         state.approval = Approval::NeedsApproval;
@@ -178,7 +225,7 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
             return Err(refused_by(&e));
         }
         Err(other) => {
-            needs_approval(ctx, &gate(), other.reason());
+            needs_approval(ctx, &gate(), None, other.reason());
             return Err(refused(other.reason()));
         }
     };
@@ -186,7 +233,7 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
     match proven(ctx, &key) {
         Ok(()) => {}
         Err(Unproven::WrongKey) => {
-            needs_approval(ctx, &gate(), "key_does_not_decrypt");
+            needs_approval(ctx, &gate(), None, "key_does_not_decrypt");
             return Err(refused("key_does_not_decrypt"));
         }
         // Nothing was refused, and nothing is known about the key either.
@@ -296,7 +343,7 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
         // The item allowed is gone, or macOS refuses even its attributes: what was allowed
         // can no longer be read, and asking again on every refresh would not change that.
         Err(e @ (KeyReadError::Missing | KeyReadError::Denied | KeyReadError::AuthFailed)) => {
-            return Err(needs_approval(ctx, &held, e.reason()));
+            return Err(needs_approval(ctx, &held, state.stamp.as_ref(), e.reason()));
         }
         // Nothing asks here, so a slow or odd answer is the keychain's moment, which says
         // nothing about whether Pitboard is allowed: nothing is recorded.
@@ -305,13 +352,19 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
         }
     };
     if state.stamp.as_ref() != Some(&stamp) {
-        return Err(needs_approval(ctx, &held, "item_changed"));
+        return Err(needs_approval(
+            ctx,
+            &held,
+            state.stamp.as_ref(),
+            "item_changed",
+        ));
     }
     if let Some((kept, key)) = cached(ctx)
         && kept == stamp
     {
         return Ok((stamp, key));
     }
+    crate::fault::point("live_usage.password_read");
     match ctx.safe_storage().password(ctx, KeyRead::Refresh) {
         Ok(password) => {
             let key = crypto::derive_key(&password);
@@ -323,7 +376,12 @@ fn keyed(ctx: &Context) -> Result<Kept, Stale> {
         // A no, a password not accepted, a question nobody answered, an item that is gone,
         // or an exit `security` is not known to give: reading again on every refresh would
         // put the question back in front of somebody, or run `security` for every row.
-        Err(other) => Err(needs_approval(ctx, &held, other.reason())),
+        Err(other) => Err(needs_approval(
+            ctx,
+            &held,
+            state.stamp.as_ref(),
+            other.reason(),
+        )),
     }
 }
 
@@ -379,15 +437,8 @@ pub(crate) fn ask(
         if !is_live {
             return Stale::ParkUnreadable;
         }
-        let held = gate();
-        // The key that failed is the one read for `stamp`. A saved state granting another
-        // item version was allowed after this read began, so what failed is not what was
-        // allowed, and withdrawing that approval would undo the one just given.
-        if load(ctx).stamp.as_ref() == Some(&stamp) {
-            needs_approval(ctx, &held, "key_does_not_decrypt")
-        } else {
-            Stale::Interrupted
-        }
+        // The key that failed is the one read for `stamp`.
+        needs_approval(ctx, &gate(), Some(&stamp), "key_does_not_decrypt")
     };
     let table = ctx
         .host()
@@ -432,14 +483,9 @@ pub(crate) fn ask(
         Ok(mut snapshot) => {
             snapshot.account_uuid = Some(account.account_uuid.clone());
             crate::switch::note_organization(ctx, &account.account_uuid, &org);
-            // Only the time is written, and only while still allowed: a row that found
-            // approval withdrawn while this one was out is not undone, nor noted as fine.
-            let _held = gate();
-            let mut state = load(ctx);
-            if state.enabled && state.approval == Approval::Granted {
-                state.last_ok_at = Some(ctx.now());
-                let _ = save(ctx, &state);
-            }
+            // Only while still allowed: a row that found approval withdrawn while this one
+            // was out is not undone, nor noted as fine.
+            note_ok(ctx);
             Ok(snapshot)
         }
         // Cloudflare stopping the request knows nothing of the session, and saying
@@ -1024,6 +1070,56 @@ mod tests {
         let state = load(&d.ctx);
         assert_eq!(state.approval, Approval::Granted, "{state:?}");
         assert!(state.enabled);
+    }
+
+    /// A refresh reading the password for the item it saw, while another program allows the
+    /// item's new version, must not take that approval back when macOS refuses the old read.
+    #[test]
+    fn a_refused_read_does_not_withdraw_a_newer_approval() {
+        let d = desk("refused-read", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        let other = d.ctx.clone();
+        let keychain = Arc::clone(&d.keychain);
+        let refused = crate::fault::meanwhile(
+            "live_usage.password_read",
+            move || {
+                // Allowed again as another version of the item, by a program with no gate
+                // of this one's. The gate is held here, so the state is written directly.
+                keychain.changed_at("20261001120000Z");
+                keychain.refusing(KeyTrouble::Denied);
+                let newer = other.safe_storage().stamp(&other).unwrap();
+                let mut state = load(&other);
+                state.stamp = Some(newer);
+                save(&other, &state).unwrap();
+            },
+            || key(&d.ctx),
+        );
+        assert_eq!(refused.err(), Some(Stale::Interrupted));
+        let state = load(&d.ctx);
+        assert_eq!(state.approval, Approval::Granted, "{state:?}");
+    }
+
+    /// A reading's success is noted by writing only its time, so a state another process
+    /// saved while the reading was out is not written over by the one this process loaded.
+    #[test]
+    fn noting_a_good_reading_leaves_a_state_saved_meanwhile_alone() {
+        let d = desk("note-ok", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        let other = d.ctx.clone();
+        let answered = crate::fault::meanwhile(
+            "live_usage.ok_noting",
+            move || {
+                let mut state = load(&other);
+                state.approval = Approval::NeedsApproval;
+                state.reason = Some("denied".into());
+                save(&other, &state).unwrap();
+            },
+            || ask(&d.ctx, &d.live(), &account(None), None),
+        );
+        answered.expect("claude.ai answered");
+        let state = load(&d.ctx);
+        assert_eq!(state.approval, Approval::NeedsApproval, "{state:?}");
+        assert_eq!(state.reason.as_deref(), Some("denied"));
     }
 
     /// A key that opens nothing is not kept, and is not taken as allowed.

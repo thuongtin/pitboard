@@ -455,7 +455,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         refuse_linked_park(&from_park).map_err(undetermined)?;
         // Where the folders are as the steps are decided, so a link put in one's place after
         // is told from the folder.
-        let bases = [Anchored::at(&from_park), Anchored::at(&root)];
+        let bases = [tree::Anchored::at(&from_park), tree::Anchored::at(&root)];
         let mut steps = Vec::new();
         for item in &journal.items {
             let parked = tree::inode_of_live(&from_park, &item.path)?;
@@ -500,6 +500,12 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         }
         crate::fault::point("tree.recovery_steps_decided");
         take(ctx, which, &bases, steps, &mut strays)?;
+        crate::fault::point("tree.recovery_taken");
+        // What follows writes into the data folder and deletes in the park, so both are
+        // looked at once more: a link put in the place of either is not where the steps
+        // were decided.
+        bases.iter().try_for_each(tree::Anchored::still_there)?;
+        refuse_linked_park(&from_park).map_err(undetermined)?;
         // The app may have rewritten its config once the items were gone, so the keys kept
         // before the first move go back with them, unless it is as it was.
         if let Some(original) = original {
@@ -529,9 +535,9 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     if let Some(dir) = &to_park {
         refuse_linked_park(dir).map_err(undetermined)?;
     }
-    let bases: Vec<Anchored> = std::iter::once(root.as_path())
+    let bases: Vec<tree::Anchored> = std::iter::once(root.as_path())
         .chain(to_park.as_deref())
-        .map(Anchored::at)
+        .map(tree::Anchored::at)
         .collect();
     let mut steps = Vec::new();
     let mut jar_installed = false;
@@ -771,35 +777,6 @@ fn verified(ctx: &Context, journal: &TreeJournal, root: &Path) -> Result<bool> {
     Ok(jar.is_some_and(|i| i.to_inode.is_some() && i.to_inode == live))
 }
 
-/// A folder the steps of a recovery are decided under, with where it really was then.
-struct Anchored {
-    path: PathBuf,
-    real: Option<PathBuf>,
-}
-
-impl Anchored {
-    fn at(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            real: std::fs::canonicalize(path).ok(),
-        }
-    }
-
-    /// Refuses a folder that is somewhere else now, as a link put in its place is.
-    fn still_there(&self) -> Result<()> {
-        if std::fs::canonicalize(&self.path).ok() == self.real {
-            return Ok(());
-        }
-        Err(Error::DesktopDataInaccessible {
-            path: self.path.clone(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "the folder is not where it was when the steps were decided",
-            ),
-        })
-    }
-}
-
 /// Take the steps, each one after asking again whether the app has opened. What is set
 /// aside goes into the recovery's one directory of strays.
 ///
@@ -810,7 +787,7 @@ impl Anchored {
 fn take(
     ctx: &Context,
     which: ProviderId,
-    bases: &[Anchored],
+    bases: &[tree::Anchored],
     steps: Vec<Step>,
     strays: &mut moves::Strays,
 ) -> Result<()> {
@@ -1261,6 +1238,48 @@ mod tests {
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "nothing was moved to where the link points"
         );
+    }
+
+    /// The park the recovery moved out of can become a link once the items are home, and
+    /// what is cleaned out of it afterwards would then be deleted from where the link points.
+    #[test]
+    fn a_park_that_became_a_link_after_the_items_came_home_is_not_cleaned() {
+        let m = desktop_machine("recovery-cleaned-link");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let outside = m.support().with_file_name("outside-cleaned");
+        std::fs::create_dir_all(&outside).unwrap();
+        for name in [CONFIG_KEYS_FILE, MANIFEST_FILE] {
+            std::fs::write(outside.join(name), "not the park's").unwrap();
+        }
+        let parks = paths::parks_dir(&m.ctx);
+        let there = m.there_park();
+        let (linked, in_parks) = (outside.clone(), parks.clone());
+        let refused = fault::meanwhile(
+            "tree.recovery_taken",
+            move || {
+                for entry in std::fs::read_dir(&in_parks).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy() != there {
+                        std::fs::remove_dir_all(entry.path()).unwrap();
+                        std::os::unix::fs::symlink(&linked, entry.path()).unwrap();
+                    }
+                }
+            },
+            || m.recover(),
+        )
+        .expect_err("the park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        for name in [CONFIG_KEYS_FILE, MANIFEST_FILE] {
+            assert!(
+                outside.join(name).is_file(),
+                "{name} where the link points is left alone"
+            );
+        }
     }
 
     /// A folder deleted and made again at the same path, or a link pointed somewhere else, is

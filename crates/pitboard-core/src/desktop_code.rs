@@ -91,8 +91,7 @@ impl DesktopCodeSession {
             .tempdir_in(&self.history_root)
             .map_err(DesktopCodeError::Launch)?
             .keep();
-        std::os::unix::fs::symlink(&projects, config.join("projects"))
-            .map_err(DesktopCodeError::Launch)?;
+        link_projects(&config).map_err(DesktopCodeError::Launch)?;
         self.command(&config)
             .status()
             .map_err(DesktopCodeError::Launch)
@@ -258,6 +257,13 @@ pub(crate) fn prepare(ctx: &Context, label: &str) -> Result<DesktopCodeSession, 
     })
 }
 
+/// The shared `projects` folder, linked into the session's own config folder. The link is
+/// resolved from the folder it sits in, so its target is written from there: a path spelled
+/// relative to where Pitboard was started would point somewhere else once Claude Code reads it.
+fn link_projects(config: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink("../projects", config.join("projects"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +314,24 @@ mod tests {
                 email: "fixture@example.invalid".into(),
                 organization_uuid: "fixture-org".into(),
             },
+        );
+    }
+
+    /// The session folder is made inside the history folder, beside `projects`, so a link
+    /// to its sibling reaches the shared history whatever the history folder was spelled as.
+    #[test]
+    fn the_session_reaches_the_shared_history_through_its_link() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("projects")).unwrap();
+        std::fs::write(base.path().join("projects/conversation"), "shared").unwrap();
+        let config = base.path().join("session-1");
+        std::fs::create_dir(&config).unwrap();
+        link_projects(&config).unwrap();
+        let target = std::fs::read_link(config.join("projects")).unwrap();
+        assert!(!target.is_absolute());
+        assert_eq!(
+            std::fs::read_to_string(config.join("projects/conversation")).unwrap(),
+            "shared"
         );
     }
 
