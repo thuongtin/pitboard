@@ -71,6 +71,29 @@ fn gate() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The lock every process takes across a read of the saved state and the write that follows
+/// it: the gate keeps this process's rows apart, and this keeps another process's, the
+/// command line's or the app's, from saving between the two. Held for a read and a write of
+/// a small file, never while macOS may be asking. Where the file cannot be opened there is
+/// nothing to lock, and the save that follows would fail the same way.
+fn state_lock(ctx: &Context) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    crate::host::fs::create_private_dir(&desktop_home(ctx)).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(lock_file(ctx))
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+fn lock_file(ctx: &Context) -> PathBuf {
+    desktop_home(ctx).join("live-usage.lock")
+}
+
 /// The state each home's live usage was in when this process found it must wait to be
 /// allowed again and could not write that down. While the saved state is still that one,
 /// the wait holds for the rest of the process, so the password is not read on every
@@ -155,6 +178,7 @@ pub(crate) fn save(ctx: &Context, state: &LiveUsage) -> Result<(), Error> {
 /// written, so a state another process saved while the reading was out is left as it is.
 fn note_ok(ctx: &Context) {
     let _held = gate();
+    let _locked = state_lock(ctx);
     let state = load(ctx);
     if !(state.enabled && state.approval == Approval::Granted) {
         return;
@@ -179,6 +203,7 @@ fn needs_approval(
     read_for: Option<&ItemStamp>,
     reason: &str,
 ) -> Stale {
+    let _locked = state_lock(ctx);
     let saved = load(ctx);
     if read_for.is_some() && saved.stamp.as_ref() != read_for {
         return Stale::Interrupted;
@@ -245,6 +270,7 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
     // Taken only now: holding it while macOS may be asking, which can take minutes, would
     // hold back every refresh in the meantime.
     let _held = gate();
+    let _locked = state_lock(ctx);
     let mut state = load(ctx);
     state.enabled = true;
     state.approval = Approval::Granted;
@@ -308,6 +334,7 @@ fn proven(ctx: &Context, key: &[u8; 16]) -> Result<(), Unproven> {
 pub(crate) fn disable(ctx: &Context) -> Result<LiveUsage, Error> {
     let _held = gate();
     forget_key(ctx);
+    let _locked = state_lock(ctx);
     let mut state = load(ctx);
     if state.enabled {
         state.enabled = false;
@@ -1120,6 +1147,33 @@ mod tests {
         let state = load(&d.ctx);
         assert_eq!(state.approval, Approval::NeedsApproval, "{state:?}");
         assert_eq!(state.reason.as_deref(), Some("denied"));
+    }
+
+    /// Another process may hold the saved state between its read and its write: a change made
+    /// here waits for it, so a stale write cannot undo what that one saved.
+    #[test]
+    fn a_change_of_the_state_waits_for_another_process_holding_it() {
+        let d = desk("state-lock", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        let held = state_lock(&d.ctx).expect("the lock is taken");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ctx = d.ctx.clone();
+        let waiting = std::thread::spawn(move || {
+            let turned_off = disable(&ctx);
+            sender.send(turned_off.is_ok()).unwrap();
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(400))
+                .is_err(),
+            "the change was made while another process held the state"
+        );
+        drop(held);
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true)
+        );
+        waiting.join().unwrap();
     }
 
     /// A key that opens nothing is not kept, and is not taken as allowed.

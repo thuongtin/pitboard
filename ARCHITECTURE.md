@@ -360,6 +360,8 @@ directory of mode 0700 whose files are 0600:
 - `live-usage-ok.json`: when the last reading succeeded, and only that. It is a file of its
   own so a refresh, which writes it every time, never rewrites `live-usage.json` over what
   another process saved there.
+- `live-usage.lock`: an empty file every process locks across a read of `live-usage.json` and
+  the write that follows, so a stale refresh in one cannot undo what another just saved.
 
 ## Tool registers
 

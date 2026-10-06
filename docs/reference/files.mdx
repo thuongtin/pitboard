@@ -58,6 +58,8 @@ A Claude Desktop parked login is a folder, not a keychain item. Pitboard keeps i
 | `strays/<time>/` | Items found in Claude's data folder that belonged to neither account, such as what Claude made while signed out. Pitboard never deletes them, and `pitboard uninstall` keeps them. |
 | `awaiting.json` | The account `pitboard use desktop --signed-out` parked, and when, until the next Claude Desktop enrolment |
 | `live-usage.json` | Whether live usage is on, and whether macOS let Pitboard read Claude's key. It never holds the key. |
+| `live-usage-ok.json` | The time of the last good reading of Claude's key, kept apart so noting it never rewrites `live-usage.json`. |
+| `live-usage.lock` | An empty file Pitboard locks while it changes `live-usage.json`, so two of its processes do not overwrite each other. |
 
 `<time>` is in milliseconds since 1 January 1970.
 

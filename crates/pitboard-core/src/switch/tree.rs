@@ -282,6 +282,25 @@ fn identity_of(path: &Path) -> Option<(u64, u64)> {
         .map(|found| (found.dev(), found.ino()))
 }
 
+/// Refuses `path` unless it is a folder and not a link to one: what a link points at is not
+/// the folder Pitboard made.
+fn refuse_linked_folder(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(found) if found.is_dir() => Ok(()),
+        Ok(_) => Err(Error::DesktopDataInaccessible {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a folder Pitboard made is a link",
+            ),
+        }),
+        Err(source) => Err(Error::DesktopDataInaccessible {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// One item moved by one rename. A move made and then not synced is an error too, though
 /// the item is where it was moved to: it is not on disk yet, so the run stops with its
 /// record, which settles by where each item is, rather than carry on to delete the record
@@ -610,13 +629,18 @@ fn park_out(
         .create(&dir)
         .map_err(unwritable(&dir))?;
     moves::fsync_dir(&parks).map_err(unwritable(&parks))?;
+    // Pinned as soon as it is made: a link put in its place since is not the folder made, and
+    // what is written to it, or anchored from it, would be where the link points.
+    fault::point("tree.park_made");
+    refuse_linked_folder(&dir)?;
+    let dir_anchor = Anchored::at(&dir);
 
     // The keys of the config as the account left them, kept before anything moves: the app
     // may rewrite its config once the items are gone, and an undo puts these back.
     let keys = config::read_keys(&paths::config_file(root))?;
+    dir_anchor.still_there()?;
     write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys.0)?;
 
-    let dir_anchor = Anchored::at(&dir);
     let anchors = [anchored_root, parks_root, &dir_anchor];
     let mut moved = Vec::new();
     for item in journal.items.iter().filter(|i| i.from_inode.is_some()) {
@@ -1506,6 +1530,38 @@ mod tests {
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "no park was made where the link points"
+        );
+    }
+
+    /// The new park can be replaced by a link between making it and writing into it.
+    #[test]
+    fn a_new_park_that_became_a_link_is_not_written_into() {
+        let m = desktop_machine("new-park-linked");
+        let outside = m.support().with_file_name("outside-new-park");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parks = paths::parks_dir(&m.ctx);
+        let there = m.there_park();
+        let linked = outside.clone();
+        let refused = fault::meanwhile(
+            "tree.park_made",
+            move || {
+                for entry in std::fs::read_dir(&parks).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy() != there {
+                        std::fs::remove_dir_all(entry.path()).unwrap();
+                        std::os::unix::fs::symlink(&linked, entry.path()).unwrap();
+                    }
+                }
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the new park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was written where the link points"
         );
     }
 
