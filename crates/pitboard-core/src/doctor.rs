@@ -356,6 +356,16 @@ pub fn gather(ctx: &Context) -> Facts {
     }
 }
 
+/// Whether `found` is a directory of `owner`'s that only `owner` can reach, and not a link:
+/// what the store insists on before it keeps a login in one.
+fn is_private_dir(found: &std::fs::Metadata, owner: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    !found.file_type().is_symlink()
+        && found.is_dir()
+        && found.uid() == owner
+        && found.mode() & 0o077 == 0
+}
+
 /// Claude Desktop's section, where the app is installed, an account is enrolled, or
 /// Pitboard has parked or set aside anything of it.
 fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
@@ -413,10 +423,11 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         }
         _ => None,
     };
-    let parks_dir_private = std::fs::symlink_metadata(&parks_dir).ok().map(|found| {
-        use std::os::unix::fs::MetadataExt;
-        !found.file_type().is_symlink() && found.is_dir() && found.mode() & 0o077 == 0
-    });
+    // SAFETY: `getuid` reads this process's user id, touches no memory, and cannot fail.
+    let me = unsafe { libc::getuid() };
+    let parks_dir_private = std::fs::symlink_metadata(&parks_dir)
+        .ok()
+        .map(|found| is_private_dir(&found, me));
     let park_names: Vec<String> = std::fs::read_dir(&parks_dir)
         .map(|entries| {
             entries
@@ -4033,6 +4044,18 @@ mod tests {
             Some(Level::Fail)
         );
         assert_eq!(level_of(&checks, "desktop_cookies"), None);
+    }
+
+    /// A parks folder only its owner can reach is not private to this user when it belongs to
+    /// another: the store refuses it, so doctor does not call it healthy.
+    #[test]
+    fn a_parks_folder_of_another_user_is_not_private() {
+        use std::os::unix::fs::MetadataExt;
+        let m = desktop_doctor("parks-owner");
+        let found =
+            std::fs::symlink_metadata(crate::provider::desktop::paths::parks_dir(&m.ctx)).unwrap();
+        assert!(is_private_dir(&found, found.uid()));
+        assert!(!is_private_dir(&found, found.uid() + 1));
     }
 
     /// A switch treats a process list it cannot read as Claude still being open and moves

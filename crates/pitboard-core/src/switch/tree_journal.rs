@@ -453,6 +453,9 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     if !forward {
         let from_park = parks.join(journal.from_park.as_deref().unwrap_or_default());
         refuse_linked_park(&from_park).map_err(undetermined)?;
+        // Where the folders are as the steps are decided, so a link put in one's place after
+        // is told from the folder.
+        let bases = [Anchored::at(&from_park), Anchored::at(&root)];
         let mut steps = Vec::new();
         for item in &journal.items {
             let parked = tree::inode_of_live(&from_park, &item.path)?;
@@ -496,7 +499,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
             keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, original)?;
         }
         crate::fault::point("tree.recovery_steps_decided");
-        take(ctx, which, &[&from_park, &root], steps, &mut strays)?;
+        take(ctx, which, &bases, steps, &mut strays)?;
         // The app may have rewritten its config once the items were gone, so the keys kept
         // before the first move go back with them, unless it is as it was.
         if let Some(original) = original {
@@ -526,6 +529,10 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     if let Some(dir) = &to_park {
         refuse_linked_park(dir).map_err(undetermined)?;
     }
+    let bases: Vec<Anchored> = std::iter::once(root.as_path())
+        .chain(to_park.as_deref())
+        .map(Anchored::at)
+        .collect();
     let mut steps = Vec::new();
     let mut jar_installed = false;
     for item in &journal.items {
@@ -584,8 +591,6 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         keep_keys_of_strays(ctx, which, &mut strays, &config, &steps, incoming)?;
     }
     crate::fault::point("tree.recovery_steps_decided");
-    let mut bases: Vec<&Path> = vec![&root];
-    bases.extend(to_park.as_deref());
     take(ctx, which, &bases, steps, &mut strays)?;
     crate::fault::point("tree.recovery_moved");
 
@@ -711,12 +716,14 @@ fn another_login_made_the_jar_theirs(
     }
     // The outgoing account's own name: its keys are told apart from a login it made since.
     let Some(park) = journal.from_park.as_deref() else {
-        return Ok(false);
+        return Ok(true);
     };
     let kept = parks.join(park).join(CONFIG_KEYS_FILE);
+    // Keys that cannot be read, or are not the ones recorded, leave nothing to tell the
+    // crash's config from a login's by, and the incoming keys are not put over it.
     Ok(match kept_keys(&kept, &journal.config_keys.from) {
         Ok(original) => original != keys,
-        Err(_) => false,
+        Err(_) => true,
     })
 }
 
@@ -764,23 +771,54 @@ fn verified(ctx: &Context, journal: &TreeJournal, root: &Path) -> Result<bool> {
     Ok(jar.is_some_and(|i| i.to_inode.is_some() && i.to_inode == live))
 }
 
+/// A folder the steps of a recovery are decided under, with where it really was then.
+struct Anchored {
+    path: PathBuf,
+    real: Option<PathBuf>,
+}
+
+impl Anchored {
+    fn at(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            real: std::fs::canonicalize(path).ok(),
+        }
+    }
+
+    /// Refuses a folder that is somewhere else now, as a link put in its place is.
+    fn still_there(&self) -> Result<()> {
+        if std::fs::canonicalize(&self.path).ok() == self.real {
+            return Ok(());
+        }
+        Err(Error::DesktopDataInaccessible {
+            path: self.path.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the folder is not where it was when the steps were decided",
+            ),
+        })
+    }
+}
+
 /// Take the steps, each one after asking again whether the app has opened. What is set
 /// aside goes into the recovery's one directory of strays.
 ///
-/// The steps were decided from what each folder held, and a folder on the way to an item can
-/// become a link before the step is taken. Every path is looked at again under the folder it
-/// was decided under (`bases`), so nothing is moved to or from where a link points.
+/// The steps were decided from what each folder held, and a folder, or one on the way to an
+/// item, can become a link before the step is taken. Every path is looked at again under the
+/// folder it was decided under, and each of those folders is still the one it was, so
+/// nothing is moved to or from where a link points.
 fn take(
     ctx: &Context,
     which: ProviderId,
-    bases: &[&Path],
+    bases: &[Anchored],
     steps: Vec<Step>,
     strays: &mut moves::Strays,
 ) -> Result<()> {
     let recheck = |path: &Path| -> Result<()> {
         for base in bases {
-            if let Ok(relative) = path.strip_prefix(base) {
-                tree::inode_of_live(base, &relative.to_string_lossy())?;
+            base.still_there()?;
+            if let Ok(relative) = path.strip_prefix(&base.path) {
+                tree::inode_of_live(&base.path, &relative.to_string_lossy())?;
             }
         }
         Ok(())
@@ -1119,6 +1157,72 @@ mod tests {
             "the new login's keys are left as they are"
         );
         assert!(pending(&m.ctx).is_some(), "the record is kept");
+    }
+
+    /// The keys the outgoing account's park kept are what tells its sign-in again from the
+    /// crash. Where they cannot be read there is nothing to tell them by, and the config is
+    /// not written over.
+    #[test]
+    fn outgoing_keys_that_cannot_be_compared_leave_recovery_undetermined() {
+        let m = desktop_machine("outgoing-keys-gone");
+        assert_eq!(m.crash_at("tree.installed").unwrap_err(), "tree.installed");
+        let journal = read(&m.ctx).unwrap().expect("a journal");
+        let kept = paths::parks_dir(&m.ctx)
+            .join(journal.from_park.expect("an outgoing park"))
+            .join(CONFIG_KEYS_FILE);
+        std::fs::remove_file(&kept).unwrap();
+        let cookies = m.support().join("Cookies");
+        std::fs::write(&cookies, b"made by Claude").unwrap();
+        m.mem
+            .plant_cookies(&cookies, jar("v10here-again", NOW + 86_400));
+        let config = m.support().join("config.json");
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        written["lastKnownAccountUuid"] = serde_json::json!("here");
+        written["oauth:tokenCache"] = serde_json::json!("cache-here-again");
+        std::fs::write(&config, written.to_string()).unwrap();
+        let before = std::fs::read(&config).unwrap();
+
+        let refused = m.recover().expect_err("nothing to compare the keys with");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read(&config).unwrap(), before);
+        assert!(pending(&m.ctx).is_some(), "the record is kept");
+    }
+
+    /// The live folder itself can become a link between planning and a move: the check of
+    /// the way to an item starts below it, so the folder is looked at too.
+    #[test]
+    fn a_data_folder_that_became_a_link_while_recovery_ran_is_not_moved_into() {
+        let m = desktop_machine("recovery-root-linked");
+        assert_eq!(
+            m.crash_at("tree.park_recorded").unwrap_err(),
+            "tree.park_recorded"
+        );
+        let outside = m.support().with_file_name("outside-root");
+        std::fs::create_dir_all(&outside).unwrap();
+        let aside = m.support().with_file_name("Claude-aside-root");
+        let support = m.support();
+        let linked = outside.clone();
+        let refused = fault::meanwhile(
+            "tree.recovery_steps_decided",
+            move || {
+                std::fs::rename(&support, &aside).unwrap();
+                std::os::unix::fs::symlink(&linked, &support).unwrap();
+            },
+            || m.recover(),
+        )
+        .expect_err("the data folder is a link now");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was moved to where the link points"
+        );
     }
 
     /// Recovery decides its steps before it takes any, and a folder on the way to an item can

@@ -1307,13 +1307,15 @@ extension AppModel {
     /// Whether `failure` left a change to Claude's files partway done: the core keeps a
     /// record of it, and the next change finishes or undoes it. Claude, quit for the change,
     /// is not opened again then, since it would start on half of each account. That includes
-    /// a record from before this change that the core could not settle: it refuses before
-    /// the change starts, so it has no warning of its own to say so, and the files are still
-    /// half of each account.
+    /// a record from before this change that the core could not read or settle: it refuses
+    /// before the change starts, so it has no warning of its own to say so, and the files are
+    /// still half of each account.
     nonisolated static func leftUnfinished(_ failure: ActionFailure?) -> Bool {
         guard let failure else { return false }
-        return ["app_opened_midway", "recovery_undetermined", "recovery_record_corrupt"]
-            .contains(failure.code)
+        return [
+            "app_opened_midway", "recovery_undetermined", "recovery_record_corrupt",
+            "recovery_failed",
+        ].contains(failure.code)
             || failure.warnings.contains { $0.code == "switch_unfinished" }
     }
 
