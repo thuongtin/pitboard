@@ -521,9 +521,25 @@ fn use_account(pitboard: &Pitboard, label: &str) -> Report {
 }
 
 /// `claude/work` for a bare `work` that Claude Code and Claude Desktop both have, as the
-/// same claude.ai account. `None` for any other label, so it resolves as it was typed.
+/// same claude.ai account. `None` for any other label, so it resolves as it was typed: a
+/// label a third tool also has names three accounts, and stays ambiguous.
 fn shared_label(pitboard: &Pitboard, label: &str) -> Option<String> {
     if bare(label) != label || pitboard.account(label).is_some() {
+        return None;
+    }
+    let elsewhere = ProviderId::ALL
+        .iter()
+        .filter(|&&which| which != ProviderId::Claude && which != ProviderId::Desktop)
+        .any(|which| {
+            pitboard
+                .account(&format!(
+                    "{}{}{label}",
+                    which.code(),
+                    pitboard_core::label::SEPARATOR
+                ))
+                .is_some()
+        });
+    if elsewhere {
         return None;
     }
     let code = format!(

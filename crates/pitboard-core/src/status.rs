@@ -558,18 +558,33 @@ pub fn gather_offline(ctx: &Context, state: &State) -> Report {
         .iter()
         .filter_map(|&which| Some((which, crate::provider::of(which).recorded_identity(ctx)?)))
         .collect();
+    let live: BTreeMap<ProviderId, LiveLogin> = tools
+        .iter()
+        .map(|&which| {
+            let login = LiveLogin {
+                recorded_uuid: crate::provider::signed_in_account(ctx, which),
+                usage: Some(Err(unasked(which))),
+                ..LiveLogin::default()
+            };
+            (which, login)
+        })
+        .collect();
+    // A folder login nothing has enrolled still has the app's own history to show.
+    let unenrolled =
+        live.iter()
+            .filter(|(which, _)| is_tree(**which))
+            .find_map(|(&which, login)| {
+                let uuid = login.recorded_uuid.as_deref().filter(|u| !u.is_empty())?;
+                state.by_uuid(which, uuid).is_none().then(|| {
+                    unenrolled_folder(&crate::provider::desktop::TreeIdentity {
+                        account_uuid: uuid.to_string(),
+                        fingerprint: String::new(),
+                        expires_at: None,
+                    })
+                })
+            });
     let facts = Facts {
-        live: tools
-            .iter()
-            .map(|&which| {
-                let login = LiveLogin {
-                    recorded_uuid: crate::provider::signed_in_account(ctx, which),
-                    usage: Some(Err(unasked(which))),
-                    ..LiveLogin::default()
-                };
-                (which, login)
-            })
-            .collect(),
+        live,
         asked: false,
         parked_usage: state
             .accounts
@@ -580,7 +595,7 @@ pub fn gather_offline(ctx: &Context, state: &State) -> Report {
             .ok()
             .as_ref()
             .and_then(crate::usage::from_config_cache),
-        desktop_history: desktop_history(ctx, state, None),
+        desktop_history: desktop_history(ctx, state, unenrolled.as_ref()),
     };
     let remembered = readings::load(ctx);
     Report {
@@ -2916,6 +2931,49 @@ mod tests {
 
         let report = gather_offline(&ctx, &State::default());
         assert_eq!(rows(&report), vec![(None, true, uuid)]);
+    }
+
+    /// The row offline for a first Desktop login carries what the app wrote down of that
+    /// login's usage, as the online read does, instead of a signed-in row with no numbers.
+    #[test]
+    fn offline_a_first_desktop_login_shows_the_apps_own_history() {
+        let m = crate::switch::harness::desktop_machine("status-offline-first-history");
+        desktop_history(&m);
+        let app = m.support().with_file_name("Claude.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "").unwrap();
+        let ctx = m
+            .ctx
+            .clone()
+            .with_desktop_app(app.to_string_lossy().into())
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding());
+
+        let report = gather_offline(&ctx, &State::default());
+        let row = report
+            .rows
+            .iter()
+            .find(|r| r.provider == ProviderId::Desktop && r.signed_in)
+            .expect("the signed in login");
+        let usage = row.usage.as_ref().expect("the app's own history");
+        assert_eq!(usage.source, Source::DesktopHistory);
+        assert_eq!(usage.windows.len(), 2);
+    }
+
+    /// A jar the app is writing at this moment says nothing of who is signed in, so offline
+    /// the account Pitboard last put there stays the one in use, as it does online.
+    #[test]
+    fn offline_a_busy_desktop_folder_keeps_the_account_pitboard_put_there() {
+        let m = crate::switch::harness::desktop_machine("status-offline-busy");
+        desktop_history(&m);
+        m.mem.jar_fails(std::io::ErrorKind::ResourceBusy);
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding());
+        let state = crate::state::load(&ctx).expect("the machine's accounts");
+
+        let report = gather_offline(&ctx, &state);
+        assert!(desktop_row(&report, "here").signed_in);
     }
 
     /// A reading remembered under the app's usage key comes back with the account's own id,

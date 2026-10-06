@@ -528,6 +528,30 @@ fn use_both_switches_a_pair_that_shares_its_label() {
     assert_eq!(signed_in_uuid(&env), Some(env.uuid('b')));
 }
 
+/// A bare label that a third tool also has names three accounts, so `--both` refuses it as
+/// ambiguous instead of taking it for the Claude Code one.
+#[test]
+fn use_both_refuses_a_bare_label_a_third_tool_also_has() {
+    let env = two_accounts("desktop-both-three-way");
+    let (a, b) = (env.uuid('a'), env.uuid('b'));
+    sign_in_desktop(&env, 'w', &b);
+    let (_, err, code) = env.run(&["enroll", "desktop/beta"]);
+    assert_eq!(code, 0, "enroll desktop/beta: {err}");
+    let (_, err, code) = env.run(&["use", "desktop", "--signed-out"]);
+    assert_eq!(code, 0, "{err}");
+    sign_in_desktop(&env, 'h', &a);
+    let (_, err, code) = env.run(&["enroll", "desktop/alpha"]);
+    assert_eq!(code, 0, "enroll desktop/alpha: {err}");
+    env.sign_in_codex(&env.uuid('c'), "c@example.com", "codex-refresh-c");
+    let (_, err, code) = env.run(&["enroll", "codex/beta"]);
+    assert_eq!(code, 0, "enroll codex/beta: {err}");
+
+    let (value, code) = json_of(&env, &["use", "beta", "--both"]);
+    assert_ne!(code, 0, "{value}");
+    assert_eq!(value["error"]["code"], "label_ambiguous", "{value}");
+    assert_eq!(env.state()["active"]["claude"], "alpha", "nothing moved");
+}
+
 /// Without the same account in the other app, `--both` switches the one asked for and says
 /// there was nothing to switch alongside it. Without `--both`, the other app is left alone.
 #[test]

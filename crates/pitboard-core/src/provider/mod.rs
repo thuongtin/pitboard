@@ -711,11 +711,15 @@ pub(crate) fn signed_in_account(ctx: &Context, which: ProviderId) -> Option<Stri
         && let Some(root) = tree.root(ctx)
     {
         // A session that cannot be read is nobody known, not the account the config still
-        // names: that is what Log out leaves behind.
-        return tree
-            .identify(ctx, &root)
-            .ok()
-            .map(|found| found.map(|live| live.account_uuid).unwrap_or_default());
+        // names: that is what Log out leaves behind. A jar the app is writing at this moment
+        // is only busy, and the account Pitboard last put there is still the one in use.
+        return match tree.identify(ctx, &root) {
+            Ok(found) => Some(found.map(|live| live.account_uuid).unwrap_or_default()),
+            Err(crate::error::Error::DesktopDataBusy { .. }) => {
+                tool.recorded_identity(ctx).map(|id| id.account_id)
+            }
+            Err(_) => None,
+        };
     }
     tool.recorded_identity(ctx).map(|id| id.account_id)
 }

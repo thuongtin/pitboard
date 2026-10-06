@@ -413,6 +413,7 @@ public final class AppModel {
     /// read, seconds after it was said once numbers moved with every session's response,
     /// with the account still out. Still one per tool, the newer first.
     private func advise(from read: Status) {
+        notifier.rearm(from: read)
         let new = Advice.about(read, tools: tools, unless: notifier.told)
         new.forEach(notifier.tell)
         let standing = new + advice.compactMap { $0.renewed(in: read, tools: tools) }

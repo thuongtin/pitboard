@@ -1249,6 +1249,31 @@ private func standInApp(in directory: URL) throws -> URL {
     #expect(model.toldForTesting == [told: 7_200])
 }
 
+/// A window that never says when it resets is told once when it runs out. Seen below its
+/// limit again, it ran out of a new period, and running out once more is told once more.
+@MainActor
+@Test func aWindowWithNoResetTimeIsToldAgainAfterItWasSeenBelowItsLimit() async {
+    let work = { (percent: Double) in
+        account("work", signedIn: true, [window("session", percent, resets: nil)])
+    }
+    let personal = account("personal", [window("session", 10, resets: nil)])
+    let stub = Stub(.success(status([work(100), personal])))
+    let model = AppModel(testing: stub)
+    await model.refresh()
+    let told = Advice.key("claude", "work", window("session", 100, resets: nil))
+    #expect(model.toldForTesting == [told: 0])
+
+    stub.answer = .success(status([work(40), personal]))
+    await model.refresh()
+    #expect(model.advice.isEmpty)
+    #expect(model.toldForTesting.isEmpty, "seen below its limit, so no longer told")
+
+    stub.answer = .success(status([work(100), personal]))
+    await model.refresh()
+    #expect(model.advice.map(\.switchTo) == ["claude/personal"])
+    #expect(model.toldForTesting == [told: 0])
+}
+
 /// A change to the account index can leave the account in use run out, and the poll that
 /// notices it reads who is signed in and the numbers again. What they show is advised then,
 /// not at the app's next read of its own.

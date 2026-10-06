@@ -85,6 +85,19 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// Forgets a window told about with no reset time once it is seen below its limit again.
+    /// A window that says when it resets is told again by its next reset, which is a new
+    /// time; one that does not would otherwise stay told for as long as the app runs.
+    func rearm(from status: Status) {
+        for account in status.accounts {
+            guard let label = account.label else { continue }
+            for window in account.usage?.windows ?? [] where window.percent < 100 {
+                let key = Advice.key(account.provider, label, window)
+                if told[key] == 0 { told[key] = nil }
+            }
+        }
+    }
+
     /// What was told about `label` of `provider`, kept as told about it under `name`, so a
     /// rename does not make an account that ran out read as one that has just run out.
     func rename(_ label: String, of provider: String, to name: String) {
