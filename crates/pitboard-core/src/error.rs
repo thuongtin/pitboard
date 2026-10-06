@@ -641,7 +641,7 @@ pub enum Error {
 
     /// `reason` is one of the stable codes live usage records: `no_gui`, `denied`,
     /// `auth_failed`, `timed_out`, `item_missing`, `key_does_not_decrypt`, `no_session`,
-    /// `other`.
+    /// `turned_off_meanwhile`, `other`.
     ///
     /// `detail` is what the keychain said where the reason is `other`, which is all there
     /// is to tell that apart from any other failure. Never the key: `security` says that
@@ -913,6 +913,10 @@ fn live_usage_not_allowed(reason: &str, detail: Option<&str>) -> String {
         "no_session" => {
             "Claude is not signed in on this Mac, so there is no session to check its key \
              against. Open Claude, sign in, then run this again."
+        }
+        "turned_off_meanwhile" => {
+            "live usage was turned off while macOS was being asked, so it stays off. Turn it on \
+             again if you still want it."
         }
         _ => match detail {
             Some(detail) => {
@@ -1376,6 +1380,7 @@ mod tests {
             "item_missing",
             "key_does_not_decrypt",
             "no_session",
+            "turned_off_meanwhile",
         ] {
             assert_ne!(live_usage_not_allowed(reason, None), fallback, "{reason}");
         }

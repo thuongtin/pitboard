@@ -128,7 +128,7 @@ Deleting a parked login does not revoke it, and Pitboard revokes no login. Its r
 - Another user with administrator access to your computer.
 - A compromised Claude Code or Codex, or a compromised library that Pitboard uses. CI checks Pitboard's Rust libraries against known advisories, and a weekly job checks Sparkle, the app's update framework, only for a newer release. Each release lists all of them in a bill of materials.
 - Signing out in anything that ran Codex before a switch, such as `/logout` in a `codex` session or **Log Out** in the ChatGPT app, which revokes the login Pitboard has parked; see [Switch accounts](/guides/switch#what-happens-to-open-sessions).
-- Using **Log out** in Claude Desktop, which ends the session at claude.ai, so a copy Pitboard parked before cannot be used again; see [Use Pitboard with Claude Desktop](/guides/claude-desktop#add-claude-desktop-accounts).
+- Using **Log out** in Claude Desktop, which ends the session at claude.ai. A copy Pitboard parked before cannot be used again; see [Use Pitboard with Claude Desktop](/guides/claude-desktop#add-claude-desktop-accounts).
 - Anyone who can already read your files.
 
 ## Report a vulnerability

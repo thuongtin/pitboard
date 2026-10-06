@@ -2708,6 +2708,30 @@ mod tests {
         );
     }
 
+    /// A rename killed after the wait was pointed at the new name and before the state was
+    /// saved leaves the account under its old name. Running the same rename again finishes it.
+    #[test]
+    fn a_rename_killed_between_the_wait_and_the_save_is_finished_by_running_it_again() {
+        let m = desktop_machine("rename-awaiting-killed");
+        signing_out(&m).expect("signed out");
+        retarget_awaiting(&m.ctx, "here", "renamed").expect("the wait followed");
+        let state = crate::state::load(&m.ctx).unwrap();
+        assert!(
+            state.get(&m.key("here")).is_some(),
+            "the save never happened"
+        );
+
+        let (settled, _) = super::super::settle(&m.ctx, Some(ProviderId::Desktop)).unwrap();
+        super::super::rename(settled, &m.key("here"), "renamed").expect("renamed again");
+        let state = crate::state::load(&m.ctx).unwrap();
+        assert!(state.get(&m.key("renamed")).is_some());
+        assert!(state.get(&m.key("here")).is_none());
+        assert_eq!(
+            awaiting_sign_in(&m.ctx).map(|a| a.from_label),
+            Some("renamed".to_string())
+        );
+    }
+
     /// The other way a rename can half happen: the wait cannot be written. Nothing is saved
     /// then, so the account keeps its name and the wait still names it.
     #[test]

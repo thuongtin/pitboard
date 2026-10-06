@@ -397,7 +397,9 @@ private func desktopMachine(
 /// refusal carries no warning: Claude, quit for the switch, is not opened on it.
 @MainActor
 @Test func aRecordTheCoreCannotSettleLeavesClaudeClosed() async throws {
-    for code in ["recovery_undetermined", "recovery_record_corrupt", "recovery_failed"] {
+    for code in [
+        "recovery_undetermined", "recovery_record_corrupt", "recovery_failed", "recovery_waiting",
+    ] {
         let (model, core, apps, trail) = desktopMachine()
         core.switchFailing = PitboardError.Failed(
             code: code, cause: nil, message: "an earlier switch cannot be settled",

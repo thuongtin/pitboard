@@ -300,6 +300,10 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
     let _held = gate();
     let _locked = state_lock(ctx)?;
     let mut state = load(ctx);
+    // Somebody turned it off while macOS was being asked: that request is the later one.
+    if began.enabled && !state.enabled {
+        return Err(refused("turned_off_meanwhile"));
+    }
     state.enabled = true;
     state.approval = Approval::Granted;
     state.reason = None;
@@ -1207,6 +1211,32 @@ mod tests {
         assert!(refused.is_err(), "this request was refused");
         let state = load(&d.ctx);
         assert_eq!(state.approval, Approval::Granted, "{state:?}");
+    }
+
+    /// A request to turn live usage on that waits for macOS's answer, while another process
+    /// turns it off, must not turn it on again: the later request is the one that stands.
+    #[test]
+    fn an_enable_does_not_undo_a_disable_made_while_it_waited() {
+        let d = desk("disabled-meanwhile", ScriptedSafeStorage::holding(PASSWORD));
+        enable(&d.ctx).expect("turned on");
+        let other = d.ctx.clone();
+        let refused = crate::fault::meanwhile(
+            "live_usage.enable_read",
+            move || {
+                // Turned off from another process, which shares no gate with this one.
+                disable(&other).expect("turned off");
+            },
+            || enable(&d.ctx),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(Error::LiveUsageNotAllowed { ref reason, .. }) if reason == "turned_off_meanwhile"
+            ),
+            "{refused:?}"
+        );
+        assert!(!load(&d.ctx).enabled, "the later turn-off stands");
+        assert!(cached(&d.ctx).is_none(), "no key is kept for it");
     }
 
     /// A reading's success is noted by writing only its time, so a state another process
