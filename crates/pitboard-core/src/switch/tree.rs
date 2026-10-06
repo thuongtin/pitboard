@@ -664,6 +664,9 @@ fn park_out(
     }
     fault::point("tree.live_parked");
 
+    // The park itself, again: a link put in its place now would take the manifest to where
+    // it points, with the login left in the folder it displaced.
+    dir_anchor.still_there()?;
     write_secret_json(
         &dir.join(MANIFEST_FILE),
         &Manifest {
@@ -1555,6 +1558,40 @@ mod tests {
             || switch_to(&m, "there"),
         )
         .expect_err("the new park became a link");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was written where the link points"
+        );
+    }
+
+    /// The park is looked at again after the last item is in it: a link put there now would
+    /// take the manifest to where it points, and leave the login in the folder it displaced.
+    #[test]
+    fn a_park_that_became_a_link_after_the_last_move_gets_no_manifest() {
+        let m = desktop_machine("park-linked-late");
+        let outside = m.support().with_file_name("outside-late-park");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parks = paths::parks_dir(&m.ctx);
+        let there = m.there_park();
+        let linked = outside.clone();
+        let refused = fault::meanwhile(
+            "tree.live_parked",
+            move || {
+                for entry in std::fs::read_dir(&parks).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy() != there {
+                        let displaced = entry.path().with_extension("displaced");
+                        std::fs::rename(entry.path(), &displaced).unwrap();
+                        std::os::unix::fs::symlink(&linked, entry.path()).unwrap();
+                    }
+                }
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("the park became a link");
         assert!(
             matches!(refused, Error::DesktopDataInaccessible { .. }),
             "{refused:?}"

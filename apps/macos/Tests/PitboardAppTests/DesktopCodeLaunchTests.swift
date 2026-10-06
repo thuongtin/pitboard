@@ -116,6 +116,14 @@ private struct DesktopCodeHelper {
     #expect(tool.codeEnvironment["PITBOARD_CLAUDE_DESKTOP_DIR"] == "\(here)/scratch/data")
 }
 
+/// The core reads an explicitly empty `PITBOARD_HOME` as the app's own directory, which is
+/// not the one Terminal starts the helper in.
+@Test func desktopCodeIsGivenTheAppsDirectoryForAnEmptyPitboardHome() {
+    let tool = CommandLineTool(
+        home: "/tmp/fixture home", environment: ["PITBOARD_HOME": ""], execute: { _ in nil })
+    #expect(tool.codeEnvironment["PITBOARD_HOME"] == FileManager.default.currentDirectoryPath)
+}
+
 /// A relative program with a directory in it is read from the app's directory, which the
 /// helper Terminal starts does not share. A bare name is looked up on the path and stays.
 @MainActor

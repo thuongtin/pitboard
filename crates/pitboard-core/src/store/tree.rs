@@ -269,6 +269,18 @@ pub(crate) fn delete_park(ctx: &Context, name: &str) -> Result<(), Error> {
     if canonical.parent() != Some(home.as_path()) {
         return Err(refuse(&park, "it is not inside the parks directory"));
     }
+    crate::fault::point("tree.park_delete_checked");
+    // The folders once more, as close to the delete as a path allows: a link put in the
+    // place of the parks directory since the checks would have it follow to a folder of the
+    // same name.
+    for dir in [desktop_home(ctx), parks.clone()] {
+        let found = std::fs::symlink_metadata(&dir).map_err(unwritable(&dir))?;
+        refuse_unless_private(&dir, &found)?;
+    }
+    let again = park.canonicalize().map_err(unwritable(&park))?;
+    if again != canonical {
+        return Err(refuse(&park, "it moved while it was being checked"));
+    }
     std::fs::remove_dir_all(&park).map_err(unwritable(&park))?;
     fsync_dir(&parks).map_err(unwritable(&parks))
 }
@@ -595,6 +607,37 @@ mod tests {
         let file = s.0.join("file");
         std::fs::write(&file, b"").unwrap();
         assert!(ensure_private_dir(&file).is_err());
+    }
+
+    /// The parks directory is looked at again just before the delete: one made a link since
+    /// the checks would have the delete follow it to a folder of the same name.
+    #[test]
+    fn delete_park_looks_at_the_parks_dir_again_before_it_deletes() {
+        let s = scratch("delete-late");
+        let (ctx, _mem) = machine(&s.0);
+        let parks = parks_dir(&ctx);
+        ensure_private_dir(&parks).unwrap();
+        std::fs::create_dir_all(parks.join("pitboard-tree-a-1")).unwrap();
+        let outside = s.0.join("outside-parks");
+        std::fs::create_dir_all(outside.join("pitboard-tree-a-1")).unwrap();
+        std::fs::write(outside.join("pitboard-tree-a-1").join("keep"), b"keep").unwrap();
+        let (moved, linked) = (s.0.join("parks-displaced"), outside.clone());
+        let refused = crate::fault::meanwhile(
+            "tree.park_delete_checked",
+            {
+                let parks = parks.clone();
+                move || {
+                    std::fs::rename(&parks, &moved).unwrap();
+                    std::os::unix::fs::symlink(&linked, &parks).unwrap();
+                }
+            },
+            || delete_park(&ctx, "pitboard-tree-a-1"),
+        );
+        assert!(refused.is_err(), "the parks dir became a link");
+        assert!(
+            outside.join("pitboard-tree-a-1").join("keep").exists(),
+            "nothing was deleted where the link points"
+        );
     }
 
     #[test]

@@ -74,20 +74,25 @@ fn gate() -> MutexGuard<'static, ()> {
 /// The lock every process takes across a read of the saved state and the write that follows
 /// it: the gate keeps this process's rows apart, and this keeps another process's, the
 /// command line's or the app's, from saving between the two. Held for a read and a write of
-/// a small file, never while macOS may be asking. Where the file cannot be opened there is
-/// nothing to lock, and the save that follows would fail the same way.
-fn state_lock(ctx: &Context) -> Option<std::fs::File> {
+/// a small file, never while macOS may be asking. Where it cannot be taken, a change made
+/// anyway could be undone by another process holding a stale copy, so none is made.
+fn state_lock(ctx: &Context) -> Result<std::fs::File, Error> {
     use std::os::unix::fs::OpenOptionsExt;
-    crate::host::fs::create_private_dir(&desktop_home(ctx)).ok()?;
+    let path = lock_file(ctx);
+    let unwritable = |source| Error::HomeUnwritable {
+        path: path.clone(),
+        source,
+    };
+    crate::host::fs::create_private_dir(&desktop_home(ctx)).map_err(unwritable)?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .mode(0o600)
-        .open(lock_file(ctx))
-        .ok()?;
-    file.lock().ok()?;
-    Some(file)
+        .open(&path)
+        .map_err(unwritable)?;
+    file.lock().map_err(unwritable)?;
+    Ok(file)
 }
 
 fn lock_file(ctx: &Context) -> PathBuf {
@@ -178,7 +183,10 @@ pub(crate) fn save(ctx: &Context, state: &LiveUsage) -> Result<(), Error> {
 /// written, so a state another process saved while the reading was out is left as it is.
 fn note_ok(ctx: &Context) {
     let _held = gate();
-    let _locked = state_lock(ctx);
+    // The time is only a note: without the lock it is left unwritten.
+    let Ok(_locked) = state_lock(ctx) else {
+        return;
+    };
     let state = load(ctx);
     if !(state.enabled && state.approval == Approval::Granted) {
         return;
@@ -203,7 +211,7 @@ fn needs_approval(
     read_for: Option<&ItemStamp>,
     reason: &str,
 ) -> Stale {
-    let _locked = state_lock(ctx);
+    let locked = state_lock(ctx);
     let saved = load(ctx);
     if read_for.is_some() && saved.stamp.as_ref() != read_for {
         return Stale::Interrupted;
@@ -214,9 +222,9 @@ fn needs_approval(
         state.approval = Approval::NeedsApproval;
         state.reason = Some(reason.to_string());
         state.changed_at = Some(ctx.now());
-        // Not saved, the wait is kept in memory instead, or the next refresh would read
-        // the password again.
-        if save(ctx, &state).is_err() {
+        // Not saved, or not safe to, the wait is kept in memory instead, or the next
+        // refresh would read the password again.
+        if locked.is_err() || save(ctx, &state).is_err() {
             unsaved().insert(crate::home::dir(ctx), saved);
         }
     }
@@ -270,7 +278,7 @@ pub(crate) fn enable(ctx: &Context) -> Result<LiveUsage, Error> {
     // Taken only now: holding it while macOS may be asking, which can take minutes, would
     // hold back every refresh in the meantime.
     let _held = gate();
-    let _locked = state_lock(ctx);
+    let _locked = state_lock(ctx)?;
     let mut state = load(ctx);
     state.enabled = true;
     state.approval = Approval::Granted;
@@ -334,7 +342,7 @@ fn proven(ctx: &Context, key: &[u8; 16]) -> Result<(), Unproven> {
 pub(crate) fn disable(ctx: &Context) -> Result<LiveUsage, Error> {
     let _held = gate();
     forget_key(ctx);
-    let _locked = state_lock(ctx);
+    let _locked = state_lock(ctx)?;
     let mut state = load(ctx);
     if state.enabled {
         state.enabled = false;
@@ -1174,6 +1182,41 @@ mod tests {
             Ok(true)
         );
         waiting.join().unwrap();
+    }
+
+    /// Where the lock cannot be taken, nothing is changed: a change made without it could
+    /// be undone by another process holding a stale copy.
+    #[test]
+    fn a_change_of_the_state_is_refused_where_the_lock_cannot_be_taken() {
+        let d = desk("state-lock-refused", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        std::fs::remove_file(lock_file(&d.ctx)).unwrap();
+        std::fs::create_dir(lock_file(&d.ctx)).unwrap();
+        let refused = disable(&d.ctx).expect_err("no lock, no change");
+        assert!(
+            matches!(refused, Error::HomeUnwritable { .. }),
+            "{refused:?}"
+        );
+        assert!(load(&d.ctx).enabled, "the state was left as it was");
+    }
+
+    /// A withdrawal that cannot be saved safely is still kept for this process, so the
+    /// password is not read again on every refresh.
+    #[test]
+    fn a_withdrawal_without_the_lock_is_kept_in_memory_not_saved() {
+        let d = desk("state-lock-unsaved", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        std::fs::remove_file(lock_file(&d.ctx)).unwrap();
+        std::fs::create_dir(lock_file(&d.ctx)).unwrap();
+        let stale = needs_approval(&d.ctx, &gate(), None, "denied");
+        assert!(matches!(stale, Stale::LiveUsageNeedsApproval));
+        assert!(
+            waits_unsaved(&d.ctx, &load(&d.ctx)),
+            "the wait holds in this process"
+        );
+        let saved: LiveUsage =
+            serde_json::from_slice(&std::fs::read(state_file(&d.ctx)).unwrap()).unwrap();
+        assert_eq!(saved.approval, Approval::Granted, "nothing was saved");
     }
 
     /// A key that opens nothing is not kept, and is not taken as allowed.

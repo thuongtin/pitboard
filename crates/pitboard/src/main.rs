@@ -846,7 +846,8 @@ const LIVE_USAGE_EXPLAINED: &str = "\
 Pitboard will read Claude's encryption key once to ask claude.ai how much each
 Claude Desktop account has left. macOS will ask for your login password:
 choose \"Always Allow\" so it does not ask again.
-Always Allow lets any program that runs /usr/bin/security read this key.
+Always Allow may let other programs that run /usr/bin/security read this key.
+Whether it does has not been measured.
 Switching accounts never needs it. Turn it off with `pitboard desktop live-usage disable`.
 ";
 

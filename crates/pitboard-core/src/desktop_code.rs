@@ -83,10 +83,14 @@ impl DesktopCodeSession {
         guard_managed(&crate::settings::managed_files())?;
         // Keep the conversation and files Code creates. Every launch gets a fresh config
         // so an earlier session cannot supply a different login on the next launch.
-        // Every folder down to the root is looked at, not only the last: a link at the one
-        // above it would take the folders made below it to where it points.
-        if let Some(sessions) = self.history_root.parent() {
-            crate::store::tree::ensure_private_dir(sessions)?;
+        // Every folder down to the root is looked at, up to Pitboard's desktop folder, not
+        // only the last: a link at one above it would take the folders made below it to
+        // where it points.
+        let mut above: Vec<&std::path::Path> =
+            self.history_root.ancestors().skip(1).take(2).collect();
+        above.reverse();
+        for folder in above {
+            crate::store::tree::ensure_private_dir(folder)?;
         }
         crate::store::tree::ensure_private_dir(&self.history_root)?;
         let projects = self.history_root.join("projects");
@@ -433,6 +437,35 @@ mod tests {
         let home = paths::desktop_home(&ctx);
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&outside, home.join("code-sessions")).unwrap();
+        let session = prepare(&ctx, "here").unwrap();
+        assert!(session.run().is_err(), "a linked folder is refused");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing was made where the link points"
+        );
+    }
+
+    /// Every folder down to the history root is looked at, up to Pitboard's desktop folder.
+    #[test]
+    fn a_desktop_folder_that_is_a_link_holds_no_code_history() {
+        let m = desktop_machine("code-history-desktop-linked");
+        plant(
+            &m.support().join("config.json"),
+            "here",
+            (NOW + 3600) * 1000,
+        );
+        let api = ScriptedApi::new();
+        owned(&api, "here");
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_api(api)
+            .with_scripted_safe_storage(ScriptedSafeStorage::holding("fixture-password"));
+        let outside = m.support().with_file_name("outside-desktop-home");
+        std::fs::create_dir_all(&outside).unwrap();
+        let home = paths::desktop_home(&ctx);
+        std::fs::remove_dir_all(&home).ok();
+        std::os::unix::fs::symlink(&outside, &home).unwrap();
         let session = prepare(&ctx, "here").unwrap();
         assert!(session.run().is_err(), "a linked folder is refused");
         assert!(

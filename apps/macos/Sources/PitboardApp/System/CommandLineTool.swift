@@ -51,8 +51,10 @@ struct CommandLineTool: Sendable {
         let home = home ?? homeDirectory(environment: environment)
         var codeEnvironment = [
             "HOME": home,
-            "PITBOARD_HOME": environment["PITBOARD_HOME"].map(Self.fromWorkingDirectory)
-                ?? "\(home)/.pitboard",
+            "PITBOARD_HOME": environment["PITBOARD_HOME"].map {
+                // Empty is a path too, to the core: this process's own directory.
+                Self.fromWorkingDirectory($0.isEmpty ? FileManager.default.currentDirectoryPath : $0)
+            } ?? "\(home)/.pitboard",
             "PITBOARD_CLAUDE_DESKTOP_DIR": environment["PITBOARD_CLAUDE_DESKTOP_DIR"]
                 .map(Self.fromWorkingDirectory) ?? "\(home)/Library/Application Support/Claude",
         ]

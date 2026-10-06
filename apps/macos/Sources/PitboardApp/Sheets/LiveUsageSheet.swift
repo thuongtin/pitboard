@@ -18,8 +18,9 @@ struct LiveUsageSheet: View {
                 + "claude.ai how much each account has left, Pitboard reads that key. macOS "
                 + "asks for your login password: choose Always Allow so it does not ask "
                 + "again for this key. If Claude replaces the key, macOS may ask once more. "
-                + "Always Allow lets any program that runs /usr/bin/security read this "
-                + "key. Pitboard only reads it, keeps it in memory, and never writes it. "
+                + "Always Allow may let other programs that run /usr/bin/security read "
+                + "this key. Whether it does has not been measured. Pitboard only reads "
+                + "it, keeps it in memory, and never writes it. "
                 + "Switching accounts never needs it."
         ) {
             if let failure {
