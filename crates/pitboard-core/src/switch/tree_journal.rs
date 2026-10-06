@@ -270,6 +270,19 @@ pub fn waiting(ctx: &Context, state: &State) -> Option<Warning> {
     })
 }
 
+/// The keys kept in a park at `file`, once they are known to be the ones the journal named.
+/// A park that lost one is damaged, and splicing it would replace a complete login with an
+/// incomplete one that is then purged with its park, so the names are compared first.
+fn kept_keys(file: &Path, named: &[String]) -> std::result::Result<config::ConfigKeys, String> {
+    let keys = config::read_keys(file).map_err(|e| e.to_string())?;
+    let mut expected = named.to_vec();
+    expected.sort();
+    if keys.0.keys().cloned().collect::<Vec<_>>() != expected {
+        return Err("the keys of the config kept in the park are not the ones recorded".into());
+    }
+    Ok(keys)
+}
+
 /// The record, where there is one. Written atomically, so a record that does not parse, or
 /// does not say what every record says, was damaged afterwards and says nothing of how far
 /// its run got.
@@ -426,7 +439,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         if kept.is_file() {
             tree::still_quiet(ctx, which)?;
             let config = paths::config_file(&root);
-            let original = config::read_keys(&kept)?;
+            let original = kept_keys(&kept, &journal.config_keys.from).map_err(undetermined)?;
             if config::read_keys(&config)? != original {
                 config::splice(&config, &original)?;
             }
@@ -493,7 +506,10 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         Operation::Switch => {
             let keys = to_park.as_ref().map(|dir| dir.join(CONFIG_KEYS_FILE));
             match keys.filter(|keys| keys.is_file()) {
-                Some(keys) => config::splice(&config, &config::read_keys(&keys)?)?,
+                Some(keys) => config::splice(
+                    &config,
+                    &kept_keys(&keys, &journal.config_keys.to).map_err(undetermined)?,
+                )?,
                 // Spliced and the park deleted already, when the folder says so.
                 None if verified(ctx, journal, &root)? => {}
                 None => {
@@ -1131,5 +1147,55 @@ mod tests {
         );
         assert_eq!(super::super::interrupted_tool(&m.ctx), None);
         assert_eq!(m.whole("here"), super::super::harness::Whole::Parked);
+    }
+
+    /// A park whose kept keys lost one the journal recorded is damaged: splicing it in would
+    /// replace the complete login with an incomplete one, and the park would then be purged.
+    /// Recovery refuses, on either side, and leaves the park where it is.
+    #[test]
+    fn recovery_refuses_kept_config_keys_that_lost_one_the_journal_names() {
+        let lose_a_key = |file: &Path| {
+            let mut keys: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            let object = keys.as_object_mut().unwrap();
+            let token_cache = object.keys().next_back().unwrap().clone();
+            object.remove(&token_cache);
+            std::fs::write(file, keys.to_string()).unwrap();
+        };
+
+        // Finishing: the incoming account's keys.
+        let m = desktop_machine("finish-lost-key");
+        assert_eq!(
+            m.crash_at("tree.park_recorded").unwrap_err(),
+            "tree.park_recorded"
+        );
+        let kept = paths::parks_dir(&m.ctx)
+            .join(m.there_park())
+            .join(CONFIG_KEYS_FILE);
+        lose_a_key(&kept);
+        let refused = m.recover().expect_err("the keys are incomplete");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        assert!(kept.is_file(), "the park is kept");
+
+        // Undoing: the outgoing account's keys.
+        let m = desktop_machine("undo-lost-key");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let journal = read(&m.ctx).unwrap().expect("a journal");
+        let kept = paths::parks_dir(&m.ctx)
+            .join(journal.from_park.expect("an outgoing park"))
+            .join(CONFIG_KEYS_FILE);
+        lose_a_key(&kept);
+        let refused = m.recover().expect_err("the keys are incomplete");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        assert!(kept.is_file(), "the park is kept");
     }
 }

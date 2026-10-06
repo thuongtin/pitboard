@@ -1,6 +1,6 @@
 //! Dropping an account and the credentials parked for it.
 
-use super::{Error, Result, Settled, purge};
+use super::{Error, Result, Settled, purge, tree};
 use crate::context::Context;
 use crate::provider::{self, ProviderId};
 use crate::service::Warning;
@@ -59,7 +59,17 @@ pub fn forget(settled: Settled, key: &Key) -> Result<(String, Vec<Warning>)> {
         label: key.typed(),
         enrolled,
     })?;
-    state::save(&ctx, &state)?;
+    // A sign-in wait that would put this account back has nobody to put back once it is
+    // gone. Emptied first, like a rename, and put back if the save fails.
+    let waited = if key.provider == ProviderId::Desktop {
+        tree::retarget_awaiting(&ctx, &key.label, "")?
+    } else {
+        None
+    };
+    if let Err(e) = state::save(&ctx, &state) {
+        tree::restore_awaiting(&ctx, waited);
+        return Err(e);
+    }
     crate::fault::point("forget.recorded");
     // Under the account's usage key, so forgetting Claude Desktop's account leaves what is
     // known about the same account in Claude Code, and the other way round.

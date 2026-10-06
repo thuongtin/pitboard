@@ -166,6 +166,9 @@ public final class AppModel {
         /// The app, as the core names it from what it runs.
         let bundleID: String
         let name: String
+        /// The other Claude app's account to switch to once this one is made, when both are
+        /// switched together: kept here, since the answer to the question comes later.
+        var twin: String? = nil
     }
 
     /// The account a switch is running for, or waiting on an answer about quitting an app
@@ -483,7 +486,7 @@ public final class AppModel {
         let twin =
             defaults.bool(forKey: DefaultsKey.switchClaudeTogether)
             ? Self.twin(of: qualified, in: status?.accounts ?? []) : nil
-        guard await switchOne(qualified), let twin else { return }
+        guard await switchOne(qualified, twin: twin), let twin else { return }
         // Claimed again before anything is awaited, as the first was.
         switching = twin
         await switchOne(twin)
@@ -510,9 +513,9 @@ public final class AppModel {
     /// One switch of `switchAsked`, with any failure said in the window. Whether it was
     /// made: not when it failed, or waits on a question about quitting an app.
     @discardableResult
-    private func switchOne(_ qualified: String) async -> Bool {
+    private func switchOne(_ qualified: String, twin: String? = nil) async -> Bool {
         if let app = await appHolding(split(qualified).provider) {
-            let pending = QuitToSwitch(
+            var pending = QuitToSwitch(
                 qualified: qualified, bundleID: app.bundleID, name: app.name)
             // Claude is the app being switched, so choosing one of its accounts is the
             // request to restart it, as adding one is. A question waited in the window,
@@ -520,6 +523,9 @@ public final class AppModel {
             if split(qualified).provider == desktopProvider {
                 return await quitAndSwitch(pending)
             }
+            // The question is answered later, by which time this call has returned: what
+            // follows the switch goes with it, or only one of the two apps would switch.
+            pending.twin = twin
             switching = nil
             quitting = pending
             showWindow(.accounts)
@@ -537,9 +543,20 @@ public final class AppModel {
     /// before anything has changed.
     ///
     /// Takes the switch it was asked about rather than reading `quitting`: the alert that
-    /// asks is gone, and has said so, before this runs. Says whether the switch was made.
+    /// asks is gone, and has said so, before this runs. Says whether the switch was made, and
+    /// when it was, goes on to the twin the question was holding back, as `switchAsked` does.
     @discardableResult
     func quitAndSwitch(_ pending: QuitToSwitch) async -> Bool {
+        guard await quitAndSwitchOne(pending) else { return false }
+        if let twin = pending.twin {
+            // Claimed again before anything is awaited, as `switchAsked` does.
+            switching = twin
+            await switchOne(twin)
+        }
+        return true
+    }
+
+    private func quitAndSwitchOne(_ pending: QuitToSwitch) async -> Bool {
         quitting = nil
         switching = pending.qualified
         defer { switching = nil }

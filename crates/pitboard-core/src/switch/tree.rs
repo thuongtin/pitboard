@@ -79,19 +79,31 @@ pub(super) fn clear_awaiting(ctx: &Context) -> Result<()> {
     }
 }
 
-/// Follows a rename of the account a wait would put back: the wait names it by its label,
-/// and an add reopened after the rename would otherwise offer to put back one that is no
-/// longer there. A wait that names another account, or nobody, is left as it is.
-pub(super) fn rename_awaiting(ctx: &Context, from: &str, to: &str) -> Result<()> {
+/// Points a wait that names the account `from` at `to`, and returns what it said before,
+/// where it changed. A rename follows it, so an add reopened afterwards does not offer to put
+/// back an account that has no such name; forgetting the account empties it, as when nobody
+/// was parked. A wait that names another account, or nobody, is left as it is.
+pub(super) fn retarget_awaiting(ctx: &Context, from: &str, to: &str) -> Result<Option<Awaiting>> {
     match awaiting_sign_in(ctx) {
-        Some(wait) if wait.from_label == from => write_awaiting(
-            ctx,
-            &Awaiting {
-                from_label: to.to_string(),
-                ..wait
-            },
-        ),
-        _ => Ok(()),
+        Some(wait) if wait.from_label == from => {
+            write_awaiting(
+                ctx,
+                &Awaiting {
+                    from_label: to.to_string(),
+                    ..wait.clone()
+                },
+            )?;
+            Ok(Some(wait))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Puts a wait back as `retarget_awaiting` found it, for a change that was not saved after
+/// all. The error that made it necessary is the one worth reporting, so this one is not.
+pub(super) fn restore_awaiting(ctx: &Context, before: Option<Awaiting>) {
+    if let Some(wait) = before {
+        let _ = write_awaiting(ctx, &wait);
     }
 }
 
@@ -1786,6 +1798,64 @@ mod tests {
             awaiting_sign_in(&m.ctx).map(|a| a.from_label),
             Some("renamed".to_string())
         );
+    }
+
+    /// The state is saved after the wait is pointed at the new name, and the wait goes back
+    /// if that save fails: a rename that did not happen must not leave the wait naming an
+    /// account that is not there.
+    #[test]
+    fn a_rename_whose_save_fails_leaves_the_wait_as_it_was() {
+        let m = desktop_machine("rename-awaiting-fails");
+        signing_out(&m).expect("signed out");
+        let (settled, _) = super::super::settle(&m.ctx, Some(ProviderId::Desktop)).unwrap();
+        let file = crate::home::dir(&m.ctx).join("state.json");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir_all(&file).unwrap();
+        let refused = super::super::rename(settled, &m.key("here"), "renamed")
+            .expect_err("the state cannot be written");
+        assert!(
+            matches!(refused, Error::StateWriteFailed { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            awaiting_sign_in(&m.ctx).map(|a| a.from_label),
+            Some("here".to_string())
+        );
+    }
+
+    /// The other way a rename can half happen: the wait cannot be written. Nothing is saved
+    /// then, so the account keeps its name and the wait still names it.
+    #[test]
+    fn a_rename_whose_wait_cannot_be_written_renames_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let m = desktop_machine("rename-wait-fails");
+        signing_out(&m).expect("signed out");
+        let home = paths::desktop_home(&m.ctx);
+        let (settled, _) = super::super::settle(&m.ctx, Some(ProviderId::Desktop)).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = super::super::rename(settled, &m.key("here"), "renamed");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        refused.expect_err("the wait cannot be written");
+        assert_eq!(
+            awaiting_sign_in(&m.ctx).map(|a| a.from_label),
+            Some("here".to_string())
+        );
+        let state = crate::state::load(&m.ctx).unwrap();
+        assert!(state.get(&m.key("here")).is_some(), "still named `here`");
+        assert!(state.get(&m.key("renamed")).is_none());
+    }
+
+    /// Forgetting the account an add waits to put back leaves the wait with nobody to put
+    /// back, as when Claude was already signed out, instead of offering an account that is
+    /// gone.
+    #[test]
+    fn forgetting_the_account_an_add_waits_to_put_back_empties_the_wait() {
+        let m = desktop_machine("forget-awaiting");
+        signing_out(&m).expect("signed out");
+        let (settled, _) = super::super::settle(&m.ctx, Some(ProviderId::Desktop)).unwrap();
+        super::super::forget(settled, &m.key("here")).expect("forgotten");
+        let wait = awaiting_sign_in(&m.ctx).expect("still waiting for a sign-in");
+        assert_eq!(wait.from_label, "");
     }
 
     #[test]
