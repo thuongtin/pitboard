@@ -144,6 +144,9 @@ pub struct DesktopFacts {
     pub strays: Strays,
     /// Whether a switch of the app's folder did not finish.
     pub recovery_pending: bool,
+    /// Why the record of an interrupted switch cannot be read, where there is one that
+    /// cannot.
+    pub recovery_unreadable: Option<String>,
     /// What is running from inside the app's bundle. `None` where that could not be asked.
     pub running: Option<Vec<crate::holder::Holding>>,
     /// Whether live usage is on, and whether macOS lets Pitboard read Claude's key, as last
@@ -362,7 +365,12 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         .unwrap_or_default();
     let parks_dir = paths::parks_dir(ctx);
     let recovery_pending = switch::tree_interrupted(ctx).is_some();
-    if !installed && enrolled.is_empty() && !recovery_pending && !paths::desktop_home(ctx).exists()
+    let recovery_unreadable = switch::tree_unreadable(ctx);
+    if !installed
+        && enrolled.is_empty()
+        && !recovery_pending
+        && recovery_unreadable.is_none()
+        && !paths::desktop_home(ctx).exists()
     {
         return None;
     }
@@ -441,6 +449,7 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         orphan_parks,
         strays,
         recovery_pending,
+        recovery_unreadable,
         running: crate::holder::find_within(ctx, tree),
         live_usage: live_usage::load(ctx),
         unverified_facts: assumptions::ASSUMPTIONS
@@ -1874,6 +1883,16 @@ fn judge_desktop(facts: &DesktopFacts, parks: &[&ParkFact], now: i64) -> Vec<Che
              finish it; `pitboard abandon` keeps every item where it is.",
         ));
     }
+    if let Some(reason) = &facts.recovery_unreadable {
+        checks.push(fail(
+            "desktop_recovery_unreadable",
+            "interrupted Claude Desktop switch",
+            "the record of a switch cannot be read",
+            format!(
+                "Every command that changes Claude Desktop refuses until this is dealt with. {reason}"
+            ),
+        ));
+    }
     checks.push({
         match facts.running.as_deref() {
             // A switch takes a process list it cannot read for Claude still being open and
@@ -2049,6 +2068,7 @@ fn desktop_environment(facts: &DesktopFacts) -> Value {
         "orphan_parks": facts.orphan_parks,
         "strays": {"count": facts.strays.count, "bytes": facts.strays.bytes},
         "recovery_pending": facts.recovery_pending,
+        "recovery_unreadable": facts.recovery_unreadable,
         "running": facts.running.as_ref().map(|holding| !holding.is_empty()),
         "live_usage": {
             "enabled": facts.live_usage.enabled,
@@ -3626,6 +3646,7 @@ mod tests {
             orphan_parks: Vec::new(),
             strays: Strays { count: 0, bytes: 0 },
             recovery_pending: false,
+            recovery_unreadable: None,
             running: Some(Vec::new()),
             live_usage: crate::status::LiveUsage::default(),
             unverified_facts: vec!["desktop_signout_revokes"],
@@ -3772,6 +3793,14 @@ mod tests {
                 Level::Warn,
                 DesktopFacts {
                     recovery_pending: true,
+                    ..desktop()
+                },
+            ),
+            (
+                "desktop_recovery_unreadable",
+                Level::Fail,
+                DesktopFacts {
+                    recovery_unreadable: Some("the record is damaged".into()),
                     ..desktop()
                 },
             ),
@@ -3923,6 +3952,31 @@ mod tests {
         if let Some(desktop) = facts.desktop.as_ref() {
             assert!(!desktop.data_dir_missing);
         }
+    }
+
+    /// A record of an interrupted switch that cannot be read stops every command about
+    /// Claude Desktop, and `pending` hides it, so doctor says it rather than report nothing.
+    #[test]
+    fn a_damaged_switch_record_is_a_failure_doctor_says() {
+        let m = desktop_doctor("damaged-switch-record");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        std::fs::write(
+            crate::provider::desktop::paths::desktop_home(&m.ctx).join("journal.json"),
+            b"{not json",
+        )
+        .unwrap();
+        let facts = gather(&m.ctx);
+        let desktop = facts.desktop.as_ref().expect("a Claude Desktop section");
+        assert!(!desktop.recovery_pending);
+        assert!(desktop.recovery_unreadable.is_some());
+        let checks = evaluate(&facts);
+        assert_eq!(
+            level_of(&checks, "desktop_recovery_unreadable"),
+            Some(Level::Fail)
+        );
     }
 
     /// A Claude Desktop park is a folder, so it is checked as one and never looked up in

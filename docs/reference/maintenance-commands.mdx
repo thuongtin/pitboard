@@ -283,6 +283,7 @@ When Codex's checks appear and Claude Code is absent, `doctor` leaves out most o
   | `desktop_park_expired` | `account desktop/<label>` | In place of `desktop_parked_login` when the sign-in has lapsed. Always warns. |
   | `desktop_strays_kept` | `Claude Desktop strays` | Only when a switch set files aside, with how many and their size. Always `ok`. |
   | `desktop_recovery_pending` | `interrupted Claude Desktop switch` | Only when a Claude Desktop switch did not finish. Always warns. |
+  | `desktop_recovery_unreadable` | `interrupted Claude Desktop switch` | Only when the record of an interrupted switch cannot be read. Always fails. |
   | `desktop_running` | `running Claude Desktop` | What runs from `Claude.app`, with process IDs. Warns when the process list cannot be read, and `ok` otherwise. |
   | `desktop_live_usage` | `Claude Desktop live usage` | Whether live usage is on. |
   | `desktop_live_usage_needs_approval` | `Claude Desktop live usage` | In place of `desktop_live_usage` when it is on and macOS has not let Pitboard read Claude's key. Always warns. |

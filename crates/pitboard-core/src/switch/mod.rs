@@ -42,6 +42,7 @@ pub(crate) use tree::{
 };
 pub use tree_journal::pending as tree_interrupted;
 pub use tree_journal::unfinished as tree_unfinished;
+pub use tree_journal::unreadable as tree_unreadable;
 pub use tree_journal::waiting as tree_waiting;
 pub use uninstall::{Removed, uninstall};
 

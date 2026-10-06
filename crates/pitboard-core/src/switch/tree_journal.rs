@@ -14,7 +14,7 @@ use crate::atomic;
 use crate::context::Context;
 use crate::provider::ProviderId;
 use crate::provider::desktop::config::{self, ConfigKeys};
-use crate::provider::desktop::paths;
+use crate::provider::desktop::{identity, paths};
 use crate::service::Warning;
 use crate::state::{self, Key, State};
 use crate::store::tree as moves;
@@ -271,6 +271,12 @@ pub fn pending(ctx: &Context) -> Option<(String, String)> {
     ))
 }
 
+/// Why the record of an interrupted folder switch cannot be read, where there is a record
+/// and it cannot be: every command about its tool refuses until it is dealt with.
+pub fn unreadable(ctx: &Context) -> Option<String> {
+    read(ctx).err().map(|error| error.to_string())
+}
+
 /// The switch a run left recorded when it failed partway, said as a warning for that
 /// failure. Names are as typed, the way `pending` says them.
 pub fn unfinished(ctx: &Context) -> Option<Warning> {
@@ -516,6 +522,7 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
 
     let to_park = journal.to_park.as_deref().map(|name| parks.join(name));
     let mut steps = Vec::new();
+    let mut jar_installed = false;
     for item in &journal.items {
         let there = root.join(&item.path);
         let live = tree::inode_of_live(&root, &item.path)?;
@@ -537,7 +544,9 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
                 let from = to_park.as_ref().expect("an inode was read there");
                 steps.push(Step::Move(from.join(&item.path), there));
             }
-            (None, Some(l)) if Some(l) == item.to_inode => {}
+            (None, Some(l)) if Some(l) == item.to_inode => {
+                jar_installed |= item.path == "Cookies";
+            }
             (None, None) if item.to_inode.is_none() => {}
             (None, Some(_)) if item.to_inode.is_none() => steps.push(Step::Stray(there)),
             _ => {
@@ -549,6 +558,14 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         }
     }
     let config = paths::config_file(&root);
+    if jar_installed
+        && journal.operation == Operation::Switch
+        && another_login_made_the_jar_theirs(ctx, journal, &root, &config)?
+    {
+        return Err(undetermined(
+            "another account signed in while recovery was stopped".into(),
+        ));
+    }
     let to_key = journal.side(&journal.to_label);
     let keys = to_park.as_ref().map(|dir| dir.join(CONFIG_KEYS_FILE));
     let incoming = match (&journal.operation, keys.filter(|keys| keys.is_file())) {
@@ -633,6 +650,34 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
         finished: true,
         signed_out: journal.operation == Operation::SignOut,
     })
+}
+
+/// A jar found already installed is told by its inode, and a rewrite in place keeps that. A
+/// session that is not the one the switch installed, under a config naming an account that
+/// is neither side of the switch, is another login's: putting the incoming account's keys
+/// over it would file one account's keys under another's session. The record is kept, and
+/// `abandon` stays available.
+fn another_login_made_the_jar_theirs(
+    ctx: &Context,
+    journal: &TreeJournal,
+    root: &Path,
+    config: &Path,
+) -> Result<bool> {
+    let Some(session) = identity::session_of(ctx, root)? else {
+        return Ok(false);
+    };
+    if Some(&session.fingerprint) == journal.to_fingerprint.as_ref() {
+        return Ok(false);
+    }
+    let keys = config::read_keys(config)?;
+    let named = keys
+        .0
+        .get(paths::LAST_KNOWN_ACCOUNT_KEY)
+        .and_then(serde_json::Value::as_str)
+        .filter(|uuid| !uuid.is_empty());
+    Ok(named.is_some_and(|uuid| {
+        Some(uuid) != journal.to_uuid.as_deref() && Some(uuid) != journal.from_uuid.as_deref()
+    }))
 }
 
 /// The keys of the config a recovery is about to write over, set aside with the strays
@@ -950,6 +995,39 @@ mod tests {
                     .contains("cache-made-by-claude")),
             "the keys of the login Claude made are set aside"
         );
+    }
+
+    /// A jar rewritten in place keeps its inode, so the inode alone cannot say the session in
+    /// it is the one the switch installed. Another account's login written over it while
+    /// recovery was stopped is not put under the incoming account's keys.
+    #[test]
+    fn a_login_written_over_the_installed_jar_is_not_given_the_incoming_keys() {
+        let m = desktop_machine("rewritten-jar");
+        assert_eq!(m.crash_at("tree.installed").unwrap_err(), "tree.installed");
+        let cookies = m.support().join("Cookies");
+        let inode_before = std::fs::metadata(&cookies).unwrap().ino();
+        std::fs::write(&cookies, b"made by Claude").unwrap();
+        m.mem.plant_cookies(&cookies, jar("v10third", NOW + 86_400));
+        assert_eq!(std::fs::metadata(&cookies).unwrap().ino(), inode_before);
+        let config = m.support().join("config.json");
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        written["lastKnownAccountUuid"] = serde_json::json!("third");
+        written["oauth:tokenCache"] = serde_json::json!("cache-third");
+        std::fs::write(&config, written.to_string()).unwrap();
+        let before = std::fs::read(&config).unwrap();
+
+        let refused = m.recover().expect_err("another account signed in");
+        assert!(
+            matches!(refused, Error::RecoveryUndetermined { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&config).unwrap(),
+            before,
+            "the other account's keys are left as they are"
+        );
+        assert!(pending(&m.ctx).is_some(), "the record is kept");
     }
 
     /// A folder deleted and made again at the same path, or a link pointed somewhere else, is

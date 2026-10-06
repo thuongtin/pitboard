@@ -20,6 +20,7 @@ expression: "value[\"data\"][\"environment\"][\"desktop\"]"
     "bytes": 0
   },
   "recovery_pending": false,
+  "recovery_unreadable": null,
   "running": "[running]",
   "live_usage": {
     "enabled": false,
