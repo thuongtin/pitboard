@@ -126,10 +126,7 @@ struct CommandLineTool: Sendable {
         if let type, type as? FileAttributeType != .typeSymbolicLink {
             return .failed("\(link) is already there and is not a link, so it was kept.")
         }
-        let (source, execute) = (Self.script(linking: helper, at: link), execute)
-        return await Task.detached(priority: .userInitiated) {
-            Self.outcome(of: execute(source))
-        }.value
+        return await Self.run(Self.script(linking: helper, at: link), with: execute)
     }
 
     /// Opens Code through this app's helper. Terminal receives a label and nonsecret paths;
@@ -140,13 +137,22 @@ struct CommandLineTool: Sendable {
                 "This copy of Pitboard cannot open Claude Code with the command line inside it."
             )
         }
-        let (source, execute) = (
+        return await Self.run(
             Self.script(openingDesktopCode: helper, label: label, environment: codeEnvironment),
-            execute
-        )
-        return await Task.detached(priority: .userInitiated) {
-            Self.outcome(of: execute(source))
-        }.value
+            with: execute)
+    }
+
+    /// `NSAppleScript` work off the main thread has to be serialized: two runs at once can
+    /// race or fail, so every script goes through this one queue, one after the other.
+    private static let scriptQueue = DispatchQueue(
+        label: "com.usepitboard.Pitboard.applescript", qos: .userInitiated)
+
+    private static func run(_ source: String, with execute: @escaping Runner) async -> Linked {
+        await withCheckedContinuation { continuation in
+            scriptQueue.async {
+                continuation.resume(returning: Self.outcome(of: execute(source)))
+            }
+        }
     }
 
     private static let codeEnvironmentKeys = [

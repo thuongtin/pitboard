@@ -713,7 +713,20 @@ fn ask_tree(
     let live = match tree.identify(ctx, &root) {
         Ok(Some(live)) => live,
         Ok(None) => return (LiveLogin::default(), None),
-        Err(e) => return (held(not_asked_folder(ctx), e.to_string()), None),
+        Err(e) => {
+            let mut login = held(not_asked_folder(ctx), e.to_string());
+            // A jar that cannot be read for good says nothing of who is signed in, and the
+            // config still names the account Log out left behind. One that is only busy or
+            // half written is the account Pitboard last put there.
+            if matches!(
+                e,
+                crate::error::Error::DesktopDataInaccessible { .. }
+                    | crate::error::Error::DesktopFormatUnknown { .. }
+            ) {
+                login.recorded_uuid = None;
+            }
+            return (login, None);
+        }
     };
     // The account the folder's config names, unless the session is known as another's: then
     // nobody is asked, as claude.ai would be given one account's session under another's name.
@@ -2901,6 +2914,28 @@ mod tests {
         assert!(here.signed_in, "the account Pitboard last put there");
         assert_eq!(here.stale, Some(Stale::LiveUsageOff));
         assert!(here.usage.is_some());
+    }
+
+    /// A jar that cannot be read for good names nobody: the config still holds the account
+    /// that Log out leaves behind, so it would show a logged-out account as the one in use.
+    #[test]
+    fn an_unreadable_desktop_folder_does_not_name_the_account_the_config_still_holds() {
+        let m = crate::switch::harness::desktop_machine("status-unreadable");
+        desktop_history(&m);
+        m.mem.jar_fails(std::io::ErrorKind::InvalidData);
+        let ctx = m
+            .ctx
+            .clone()
+            .with_scripted_safe_storage(crate::api::scripted::ScriptedSafeStorage::forbidding())
+            .with_scripted_api(ScriptedApi::new());
+        let state = crate::state::load(&ctx).expect("the machine's accounts");
+
+        let report = gather(&ctx, &state, false);
+        let here = desktop_row(&report, "here");
+        assert!(
+            !here.signed_in,
+            "the config's account is not taken as signed in"
+        );
     }
 
     /// While an interrupted switch waits for Claude to be quit, the folder may hold either

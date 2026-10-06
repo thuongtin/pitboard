@@ -1137,6 +1137,11 @@ fn uninstall(pitboard: &Pitboard) -> Report {
                 "parks_left": removed.left,
                 "home_removed": removed.home_removed,
                 "schedule_removed": removed.schedule_removed,
+                "kept": removed
+                    .kept
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>(),
             }),
             human,
         )

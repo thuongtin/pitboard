@@ -567,6 +567,9 @@ fn park_out(
     for item in journal.items.iter().filter(|i| i.from_inode.is_some()) {
         // Asked again before every move: the app may have been opened since the last.
         still_quiet(ctx, which)?;
+        // A folder on the way may have become a link since the record was made, and a
+        // rename follows it.
+        inode_of_live(root, &item.path)?;
         move_item(&root.join(&item.path), &dir.join(&item.path))?;
         moved.push(item.path.clone());
         if moved.len() == 1 {
@@ -793,6 +796,7 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     for item in &journal.items {
         still_quiet(ctx, which)?;
         let there = root.join(&item.path);
+        inode_of_live(&root, &item.path)?;
         if inode_at(&there)?.is_some() {
             set_aside.set_aside(ctx, &there)?;
             strays += 1;
@@ -812,9 +816,12 @@ pub(super) fn switch(settled: Settled, key: &Key) -> Result<(Outcome, Vec<Warnin
     // hold keys the app wrote since, which no park holds, so they are set aside with the
     // strays rather than written over.
     still_quiet(ctx, which)?;
-    if from_key.is_none() {
+    // With an outgoing account the park holds its keys, so what is left is only new when it
+    // is not those either: a login the app made between the park and the install.
+    {
         let left = config::read_keys(&paths::config_file(&root))?;
-        if !left.0.is_empty() && left != incoming_keys {
+        if !left.0.is_empty() && left != incoming_keys && (from_key.is_none() || left != live_keys)
+        {
             let slot = set_aside.dir(ctx)?;
             write_secret_json(&slot.join(CONFIG_KEYS_FILE), &left.0)?;
             strays += 1;
@@ -1646,6 +1653,44 @@ mod tests {
         );
     }
 
+    /// Claude can sign in to another account and quit between the outgoing account being
+    /// parked and the incoming one installed. Its keys are in the config, which the park does
+    /// not hold, so a switch that writes the incoming keys over them sets them aside first.
+    #[test]
+    fn config_keys_claude_wrote_after_the_park_are_set_aside() {
+        let m = desktop_machine("strays-config-after-park");
+        let path = m.support().join("config.json");
+        let rewritten = path.clone();
+        let (_, warnings) = fault::meanwhile(
+            "tree.park_stored",
+            move || {
+                let mut config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&rewritten).unwrap()).unwrap();
+                config["oauth:tokenCacheV2"] = serde_json::json!("cache-made-after-park");
+                std::fs::write(&rewritten, config.to_string()).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect("installed");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, Warning::StraysKept { count: 1, .. })),
+            "{warnings:?}"
+        );
+        let mut kept = Vec::new();
+        super::super::harness::files_under(&paths::strays_dir(&m.ctx), &mut kept);
+        assert!(
+            kept.iter()
+                .filter(|p| p.file_name().is_some_and(|n| n == CONFIG_KEYS_FILE))
+                .map(|p| config::read_keys(p).unwrap())
+                .any(|keys| keys.0.get("oauth:tokenCacheV2")
+                    == Some(&serde_json::json!("cache-made-after-park"))),
+            "the keys are set aside"
+        );
+        assert_eq!(m.whole("there"), super::super::harness::Whole::Live);
+    }
+
     #[test]
     fn an_expired_park_is_not_installed() {
         let m = desktop_machine("expired");
@@ -1816,6 +1861,37 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(m.inodes(), before);
+        assert!(
+            store.join("CURRENT").exists(),
+            "what the link points at stays"
+        );
+    }
+
+    /// A folder on the way to an item can become a link after the checks the record was made
+    /// from, and a rename follows it. Every move looks again, so nothing is taken from where
+    /// the link points.
+    #[test]
+    fn a_folder_that_became_a_link_after_the_record_is_not_moved_through() {
+        let m = desktop_machine("live-linked-after-record");
+        let outside = m.support().with_file_name("outside-after-record");
+        let store = outside.join("https_claude.ai_0.indexeddb.leveldb");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("CURRENT"), "not Claude's").unwrap();
+        let indexed = m.support().join("IndexedDB");
+        let linked = outside.clone();
+        let refused = fault::meanwhile(
+            "tree.item_parked",
+            move || {
+                let _ = std::fs::remove_dir_all(&indexed);
+                std::os::unix::fs::symlink(&linked, &indexed).unwrap();
+            },
+            || switch_to(&m, "there"),
+        )
+        .expect_err("a linked parent");
+        assert!(
+            matches!(refused, Error::DesktopDataInaccessible { .. }),
+            "{refused:?}"
+        );
         assert!(
             store.join("CURRENT").exists(),
             "what the link points at stays"

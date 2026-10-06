@@ -199,3 +199,37 @@ private struct DesktopCodeHelper {
         contentsOf: macos.appending(path: "scripts/build-app.sh"), encoding: .utf8)
     #expect(build.contains(#"--entitlements apps/macos/App/Pitboard.entitlements "$app""#))
 }
+
+/// Counts how many runs are inside the runner at once.
+private final class Overlap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var running = 0
+    private(set) var most = 0
+
+    func run() {
+        lock.lock()
+        running += 1
+        most = max(most, running)
+        lock.unlock()
+        Thread.sleep(forTimeInterval: 0.05)
+        lock.lock()
+        running -= 1
+        lock.unlock()
+    }
+}
+
+/// `NSAppleScript` off the main thread is run one script at a time, so two requests that
+/// overlap never run the runner together.
+@Test func overlappingScriptRunsAreSerialized() async throws {
+    let helper = try DesktopCodeHelper()
+    defer { helper.remove() }
+    let overlap = Overlap()
+    let tool = helper.tool { _ in
+        overlap.run()
+        return nil
+    }
+    async let first = tool.openDesktopCode(label: "first")
+    async let second = tool.openDesktopCode(label: "second")
+    _ = await (first, second)
+    #expect(overlap.most == 1)
+}
