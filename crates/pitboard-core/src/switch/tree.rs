@@ -380,6 +380,18 @@ pub(crate) fn check_park(
     if !dir.join(CONFIG_KEYS_FILE).is_file() {
         return Err(corrupt("the keys of its config are missing"));
     }
+    // These keys are spliced in after the files move, and the run then checks the folder says
+    // whose it is. Keys of another account, or of none, fail that check on every try.
+    let keys = config::read_keys(&dir.join(CONFIG_KEYS_FILE))
+        .map_err(|_| corrupt("the keys of its config cannot be read"))?;
+    if keys
+        .0
+        .get(paths::LAST_KNOWN_ACCOUNT_KEY)
+        .and_then(serde_json::Value::as_str)
+        != Some(account.account_uuid.as_str())
+    {
+        return Err(corrupt("the keys of its config are not its account's"));
+    }
     // Every item the manifest lists was in the park when it was made; one gone is a login
     // that would be installed incomplete.
     for item in &manifest.items {
@@ -612,7 +624,8 @@ fn park_out(
     Ok(park)
 }
 
-/// Every Claude Desktop park running out within a week, which nothing can renew.
+/// Every Claude Desktop park running out within a week, which nothing can renew. One that
+/// has already lapsed is not running out: its row says so, and a switch refuses it.
 pub(crate) fn expiring(ctx: &Context, state: &State, which: ProviderId) -> Vec<Warning> {
     state
         .accounts
@@ -620,9 +633,11 @@ pub(crate) fn expiring(ctx: &Context, state: &State, which: ProviderId) -> Vec<W
         .filter(|a| a.provider() == which)
         .filter_map(|a| {
             let expires_at = a.parked.as_ref()?.refresh_expires_at?;
-            (expires_at < ctx.now() + EXPIRES_SOON).then(|| Warning::ParkExpiresSoon {
-                label: state.typed(&a.key()),
-                expires_at,
+            (expires_at > ctx.now() && expires_at < ctx.now() + EXPIRES_SOON).then(|| {
+                Warning::ParkExpiresSoon {
+                    label: state.typed(&a.key()),
+                    expires_at,
+                }
             })
         })
         .collect()
@@ -1696,6 +1711,34 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(m.inodes(), before);
+    }
+
+    /// The keys of a park's config say whose they are. Another account's, or none, would be
+    /// spliced in after the files moved and fail the check at the end, every time, so the park
+    /// is refused before anything moves.
+    #[test]
+    fn a_park_whose_config_keys_name_another_account_is_refused() {
+        for (name, keys) in [
+            (
+                "keys-elsewhere",
+                serde_json::json!({"lastKnownAccountUuid": "someone-else", "oauth:tokenCache": "cache"}),
+            ),
+            (
+                "keys-no-account",
+                serde_json::json!({"oauth:tokenCache": "cache"}),
+            ),
+        ] {
+            let m = desktop_machine(name);
+            let dir = paths::parks_dir(&m.ctx).join(m.there_park());
+            write_secret_json(&dir.join(CONFIG_KEYS_FILE), &keys).unwrap();
+            let before = m.inodes();
+            let refused = switch_to(&m, "there").expect_err("keys of someone else");
+            assert!(
+                matches!(refused, Error::ParkedCredentialCorrupt { .. }),
+                "{name}: {refused:?}"
+            );
+            assert_eq!(m.inodes(), before, "{name}");
+        }
     }
 
     /// A move that was made but could not be synced is not on disk yet, so the run stops

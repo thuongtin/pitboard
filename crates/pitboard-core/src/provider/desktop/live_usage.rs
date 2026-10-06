@@ -357,7 +357,15 @@ fn open(
 /// allowed again. One that does not open a park says only that the park was encrypted with
 /// another, copied from another Mac or left from before Claude made its key again: that
 /// park is unreadable, and nothing else changes, so allowing again would not loop on it.
-pub(crate) fn ask(ctx: &Context, root: &Path, account: &Account) -> Result<Snapshot, Stale> {
+///
+/// `expected_session` is the fingerprint of the session `account` was named from. Where it is
+/// given, a jar that now holds another session is not asked about.
+pub(crate) fn ask(
+    ctx: &Context,
+    root: &Path,
+    account: &Account,
+    expected_session: Option<&str>,
+) -> Result<Snapshot, Stale> {
     let key = key(ctx)?;
     let is_live = support_dir(ctx).is_some_and(|live| live == root);
     let wrong_key = || {
@@ -374,6 +382,17 @@ pub(crate) fn ask(ctx: &Context, root: &Path, account: &Account) -> Result<Snaps
             std::io::ErrorKind::NotFound => Stale::NothingSignedIn,
             _ => Stale::LoginUnreadable,
         })?;
+    // The account was named from a read of the jar made before this one. A switch or a renewal
+    // between the two reads would have this table's session asked about under that account's
+    // name, so a session that is not the one the account was named from is not asked about.
+    if let Some(expected) = expected_session
+        && cookies::session(&table)
+            .ok()
+            .flatten()
+            .is_none_or(|read| read.fingerprint != expected)
+    {
+        return Err(Stale::NotAsked);
+    }
     let session = match open(&key, &table, "sessionKey") {
         Ok(Some(session)) => session,
         Ok(None) => return Err(Stale::NothingSignedIn),
@@ -640,7 +659,7 @@ mod tests {
         everything_but_enable();
         assert_eq!(key(&ctx).err(), Some(Stale::LiveUsageOff));
         assert_eq!(
-            ask(&ctx, &d.live(), &account(Some(ORG))).err(),
+            ask(&ctx, &d.live(), &account(Some(ORG)), None).err(),
             Some(Stale::LiveUsageOff)
         );
 
@@ -658,7 +677,7 @@ mod tests {
         everything_but_enable();
         assert_eq!(key(&ctx).err(), Some(Stale::LiveUsageNeedsApproval));
         assert_eq!(
-            ask(&ctx, &d.live(), &account(Some(ORG))).err(),
+            ask(&ctx, &d.live(), &account(Some(ORG)), None).err(),
             Some(Stale::LiveUsageNeedsApproval)
         );
 
@@ -699,7 +718,7 @@ mod tests {
 
         assert_eq!(key(&d.ctx).err(), Some(Stale::LiveUsageNeedsApproval));
         assert_eq!(
-            ask(&d.ctx, &d.live(), &account(None)).err(),
+            ask(&d.ctx, &d.live(), &account(None), None).err(),
             Some(Stale::LiveUsageNeedsApproval)
         );
         assert_eq!(
@@ -720,7 +739,7 @@ mod tests {
 
         assert_eq!(key(&d.ctx).err(), Some(Stale::LiveUsageNeedsGui));
         assert_eq!(
-            ask(&d.ctx, &d.live(), &account(None)).err(),
+            ask(&d.ctx, &d.live(), &account(None), None).err(),
             Some(Stale::LiveUsageNeedsGui)
         );
         assert_eq!(load(&d.ctx), before);
@@ -798,7 +817,7 @@ mod tests {
         let d = desk("once", ScriptedSafeStorage::holding(PASSWORD));
         enable(&d.ctx).expect("turned on");
         for _ in 0..3 {
-            let read = ask(&d.ctx, &d.live(), &account(None)).expect("asked");
+            let read = ask(&d.ctx, &d.live(), &account(None), None).expect("asked");
             assert_eq!(read.windows[0].percent, 42.0);
             assert_eq!(read.account_uuid.as_deref(), Some(ACCOUNT));
         }
@@ -812,7 +831,7 @@ mod tests {
         // A new process reads it once more, without asking anybody.
         forget_key(&d.ctx);
         for _ in 0..3 {
-            ask(&d.ctx, &d.live(), &account(None)).expect("asked");
+            ask(&d.ctx, &d.live(), &account(None), None).expect("asked");
         }
         assert_eq!(d.keychain.password_reads(), 2);
         assert_eq!(d.keychain.approval_reads(), 1);
@@ -828,7 +847,7 @@ mod tests {
         state.accounts.push(account(None));
         crate::state::save(&d.ctx, &state).unwrap();
 
-        ask(&d.ctx, &d.live(), &account(None)).expect("asked");
+        ask(&d.ctx, &d.live(), &account(None), None).expect("asked");
         let kept = |ctx: &Context| match &crate::state::load(ctx).unwrap().accounts[0].detail {
             Detail::Desktop {
                 organization_uuid, ..
@@ -841,7 +860,7 @@ mod tests {
         d.mem
             .plant_cookies(&cookies_db(&d.live()), jar(PASSWORD, None));
         let known = crate::state::load(&d.ctx).unwrap().accounts[0].clone();
-        ask(&d.ctx, &d.live(), &known).expect("asked with the kept organization");
+        ask(&d.ctx, &d.live(), &known, None).expect("asked with the kept organization");
     }
 
     /// A refresh reads the live folder and every park at once, each on its own thread. The
@@ -858,7 +877,7 @@ mod tests {
             for _ in 0..rows {
                 scope.spawn(|| {
                     start.wait();
-                    ask(&d.ctx, &d.live(), &account(None)).expect("asked");
+                    ask(&d.ctx, &d.live(), &account(None), None).expect("asked");
                 });
             }
         });
@@ -890,7 +909,7 @@ mod tests {
                 .map(|_| {
                     scope.spawn(|| {
                         start.wait();
-                        ask(&d.ctx, &d.live(), &account(None)).err()
+                        ask(&d.ctx, &d.live(), &account(None), None).err()
                     })
                 })
                 .collect();
@@ -957,7 +976,7 @@ mod tests {
             }),
         });
 
-        ask(&ctx, &d.live(), &account(None)).expect("claude.ai answered");
+        ask(&ctx, &d.live(), &account(None), None).expect("claude.ai answered");
         let state = load(&d.ctx);
         assert_eq!(state.approval, Approval::NeedsApproval);
         assert_eq!(state.reason.as_deref(), Some("item_changed"));
@@ -981,7 +1000,7 @@ mod tests {
         granted(&d);
         d.keychain.now_holding("somebody else's");
         assert_eq!(
-            ask(&d.ctx, &d.live(), &account(None)).err(),
+            ask(&d.ctx, &d.live(), &account(None), None).err(),
             Some(Stale::LiveUsageNeedsApproval)
         );
         let state = load(&d.ctx);
@@ -1002,15 +1021,15 @@ mod tests {
         let ctx = d.ctx.clone().with_memory_stores(Arc::clone(&mem));
         mem.plant_cookies(&cookies_db(&d.live()), jar(PASSWORD, None));
         assert_eq!(
-            ask(&ctx, &d.live(), &account(None)).err(),
+            ask(&ctx, &d.live(), &account(None), None).err(),
             Some(Stale::DesktopOrgUnknown)
         );
-        ask(&ctx, &d.live(), &account(Some(ORG))).expect("the account's own");
+        ask(&ctx, &d.live(), &account(Some(ORG)), None).expect("the account's own");
 
         // A session claude.ai no longer takes is an expired one.
         d.api.web_trouble(SESSION, Trouble::Unauthorized);
         assert_eq!(
-            ask(&d.ctx, &d.live(), &account(None)).err(),
+            ask(&d.ctx, &d.live(), &account(None), None).err(),
             Some(Stale::SessionExpired)
         );
     }
@@ -1033,7 +1052,7 @@ mod tests {
         assert!(state.enabled, "still on, waiting to be allowed again");
         for _ in 0..3 {
             assert_eq!(
-                ask(&d.ctx, &d.live(), &account(None)).err(),
+                ask(&d.ctx, &d.live(), &account(None), None).err(),
                 Some(Stale::LiveUsageNeedsApproval)
             );
         }
@@ -1064,7 +1083,7 @@ mod tests {
 
         d.keychain.now_holding(PASSWORD);
         enable(&d.ctx).expect("allowed again");
-        ask(&d.ctx, &d.live(), &account(None)).expect("answered again");
+        ask(&d.ctx, &d.live(), &account(None), None).expect("answered again");
     }
 
     /// Waiting to be allowed again holds for the rest of the process even where it could
@@ -1085,7 +1104,7 @@ mod tests {
 
         let first = key(&d.ctx).err();
         let later: Vec<_> = (0..3)
-            .map(|_| ask(&d.ctx, &d.live(), &account(None)).err())
+            .map(|_| ask(&d.ctx, &d.live(), &account(None), None).err())
             .collect();
         let reads = d.keychain.password_reads();
         let after = load(&d.ctx);
@@ -1106,7 +1125,28 @@ mod tests {
 
         d.keychain.now_holding(PASSWORD);
         enable(&d.ctx).expect("allowed again");
-        ask(&d.ctx, &d.live(), &account(None)).expect("answered again");
+        ask(&d.ctx, &d.live(), &account(None), None).expect("answered again");
+    }
+
+    /// A status read names the account from one read of the jar and asks with a second. If a
+    /// switch landed another session between the two, claude.ai would be given that session
+    /// and the answer filed under the account the first read named.
+    #[test]
+    fn a_session_other_than_the_one_the_account_was_named_from_is_not_asked_about() {
+        let d = desk("session-changed", ScriptedSafeStorage::holding(PASSWORD));
+        granted(&d);
+        let named_from = cookies::session(&jar(PASSWORD, Some(ORG)))
+            .unwrap()
+            .unwrap()
+            .fingerprint;
+        assert!(
+            ask(&d.ctx, &d.live(), &account(None), Some(&named_from)).is_ok(),
+            "the same session is asked about"
+        );
+        let calls = d.api.calls();
+        let refused = ask(&d.ctx, &d.live(), &account(None), Some("another-session"));
+        assert_eq!(refused.err(), Some(Stale::NotAsked));
+        assert_eq!(d.api.calls(), calls, "nobody was asked");
     }
 
     /// claude.ai's bot check stopping a request says nothing about the session or the key:
@@ -1119,7 +1159,7 @@ mod tests {
         let before = load(&d.ctx);
         d.api.web_trouble(SESSION, Trouble::BotCheck);
         assert_eq!(
-            ask(&d.ctx, &d.live(), &account(Some(ORG))).err(),
+            ask(&d.ctx, &d.live(), &account(Some(ORG)), None).err(),
             Some(Stale::BotCheck)
         );
         assert_eq!(load(&d.ctx), before);
@@ -1183,7 +1223,7 @@ mod tests {
         let park = d.park(ACCOUNT, NOW - 60, jar("somebody else's", Some(ORG)));
 
         assert_eq!(
-            ask(&d.ctx, &park, &account(None)).err(),
+            ask(&d.ctx, &park, &account(None), None).err(),
             Some(Stale::ParkUnreadable)
         );
         let state = load(&d.ctx);
@@ -1192,7 +1232,7 @@ mod tests {
         assert!(cached(&d.ctx).is_some(), "the key is kept");
         assert_eq!(d.api.calls(), 0, "nothing was sent for the park");
 
-        ask(&d.ctx, &d.live(), &account(None)).expect("the live folder still answers");
+        ask(&d.ctx, &d.live(), &account(None), None).expect("the live folder still answers");
         assert_eq!(
             d.keychain.password_reads(),
             2,

@@ -45,12 +45,15 @@ pub(crate) const ITEMS: &[TreeItem] = &[
     },
 ];
 
+/// The key of `config.json` that names the account the app last had signed in.
+pub(crate) const LAST_KNOWN_ACCOUNT_KEY: &str = "lastKnownAccountUuid";
+
 /// The keys of `config.json` that belong to the account signed in. Every other key there
 /// belongs to the machine and stays where it is.
 pub(crate) const CONFIG_KEYS: [&str; 3] = [
     "oauth:tokenCache",
     "oauth:tokenCacheV2",
-    "lastKnownAccountUuid",
+    LAST_KNOWN_ACCOUNT_KEY,
 ];
 
 /// Chromium's link in the data folder naming the process that has it open. Claude Desktop

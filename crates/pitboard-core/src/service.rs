@@ -1239,6 +1239,33 @@ mod tests {
         }
     }
 
+    /// A park that has already lapsed is not running out: the row says its sign-in lapsed and
+    /// a switch refuses it, so a date in the past is no date to switch before.
+    #[test]
+    fn a_status_read_does_not_say_a_lapsed_desktop_login_is_running_out() {
+        use crate::switch::harness::{NOW, desktop_machine};
+        let m = desktop_machine("service-lapsed");
+        let mut state = state::load(&m.ctx).unwrap();
+        let key = state
+            .accounts
+            .iter()
+            .find(|a| a.provider() == ProviderId::Desktop && a.parked.is_some())
+            .map(Account::key)
+            .expect("a parked account");
+        let mut account = state.get(&key).unwrap().clone();
+        account.parked.as_mut().unwrap().refresh_expires_at = Some(NOW - 60);
+        state.upsert(account);
+        state::save(&m.ctx, &state).unwrap();
+        let pitboard = Pitboard::new(m.ctx.clone());
+
+        let offline = pitboard.status_offline().expect("read");
+        let online = pitboard.status(false).expect("read");
+        for (read, done) in [("offline", offline), ("online", online)] {
+            let codes: Vec<_> = done.warnings.iter().map(Warning::code).collect();
+            assert!(!codes.contains(&"park_expires_soon"), "{read}: {codes:?}");
+        }
+    }
+
     /// A Claude Desktop switch that fails partway keeps its record, and the failure says so:
     /// whoever quit Claude for it must keep Claude closed until the next change finishes or
     /// undoes it, rather than open it on half of each account. A refusal that already says

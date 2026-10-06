@@ -709,9 +709,13 @@ pub(crate) fn signed_in_account(ctx: &Context, which: ProviderId) -> Option<Stri
     let tool = of(which);
     if let Some(tree) = tool.tree()
         && let Some(root) = tree.root(ctx)
-        && let Ok(found) = tree.identify(ctx, &root)
     {
-        return Some(found.map(|live| live.account_uuid).unwrap_or_default());
+        // A session that cannot be read is nobody known, not the account the config still
+        // names: that is what Log out leaves behind.
+        return tree
+            .identify(ctx, &root)
+            .ok()
+            .map(|found| found.map(|live| live.account_uuid).unwrap_or_default());
     }
     tool.recorded_identity(ctx).map(|id| id.account_id)
 }
@@ -731,6 +735,21 @@ pub(crate) fn of(provider: ProviderId) -> &'static dyn Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A jar that cannot be read says nothing of who is signed in. The config still names the
+    /// account that was there, so falling back to it would call a session that could not be
+    /// established signed in.
+    #[test]
+    fn a_login_folder_whose_session_cannot_be_read_names_nobody() {
+        use crate::switch::harness::desktop_machine;
+        let m = desktop_machine("identity-unreadable");
+        assert_eq!(
+            signed_in_account(&m.ctx, ProviderId::Desktop).as_deref(),
+            Some("here")
+        );
+        m.mem.jar_fails(std::io::ErrorKind::InvalidData);
+        assert_eq!(signed_in_account(&m.ctx, ProviderId::Desktop), None);
+    }
 
     /// The code is written into a label prefix, the state file, a park's name and the audit
     /// log. If it ever stopped round-tripping, a state file would load with an account

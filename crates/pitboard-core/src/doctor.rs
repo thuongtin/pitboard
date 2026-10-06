@@ -120,6 +120,10 @@ pub struct DesktopFacts {
     pub version: Option<String>,
     /// Where it keeps its data.
     pub support_dir: Option<PathBuf>,
+    /// Whether that folder is gone while an account is enrolled or a switch waits to finish:
+    /// every change of the app's login starts by reading it. A Claude that has never run
+    /// has none, and that is no fault.
+    pub data_dir_missing: bool,
     /// Whether that and Pitboard's parks are on one volume, where a move is a rename.
     /// `None` where either is not there to be asked.
     pub same_volume: Option<bool>,
@@ -421,10 +425,13 @@ fn desktop_facts(ctx: &Context, state: Option<&State>) -> Option<DesktopFacts> {
         count_files(&paths::strays_dir(ctx), &mut strays);
         strays
     };
+    let data_dir_missing = (!enrolled.is_empty() || recovery_pending)
+        && support_dir.as_ref().is_none_or(|dir| !dir.is_dir());
     Some(DesktopFacts {
         installed,
         version: installed.then(|| paths::installed_version(ctx)).flatten(),
         support_dir,
+        data_dir_missing,
         same_volume,
         cookies_meta_version: table.as_ref().map(|t| t.meta_version),
         cookies_error,
@@ -1773,6 +1780,15 @@ fn judge_desktop(facts: &DesktopFacts, parks: &[&ParkFact], now: i64) -> Vec<Che
         )),
         None => {}
     }
+    if facts.data_dir_missing {
+        checks.push(fail(
+            "desktop_data_folder_missing",
+            "Claude Desktop data",
+            "Claude's data folder is not there",
+            "Accounts are enrolled, but the folder a switch reads is gone. Open Claude once so \
+             it makes the folder, or check `PITBOARD_CLAUDE_DESKTOP_DIR` if you set one.",
+        ));
+    }
     if let Some(reason) = &facts.cookies_error {
         // A jar the app is writing can be busy for a moment, so while it runs this is only
         // a warning; with the app closed, nothing else explains it.
@@ -1859,18 +1875,26 @@ fn judge_desktop(facts: &DesktopFacts, parks: &[&ParkFact], now: i64) -> Vec<Che
         ));
     }
     checks.push({
-        let (detail, advice) = match facts.running.as_deref() {
-            None => ("could not tell".to_string(), String::new()),
-            Some([]) => ("not running".to_string(), String::new()),
-            Some(holding) => (
-                crate::holder::described_with_pids(holding),
-                "Quit Claude (Command-Q) before a switch; nothing is moved while it runs."
-                    .to_string(),
+        match facts.running.as_deref() {
+            // A switch takes a process list it cannot read for Claude still being open and
+            // moves nothing, so this prerequisite is not healthy.
+            None => warn(
+                "desktop_running",
+                "running Claude Desktop",
+                "could not tell",
+                "The process list could not be read, and a switch moves nothing while it cannot \
+                 tell whether Claude is open. Check that `ps` runs, then try again.",
             ),
-        };
-        Check {
-            advice,
-            ..ok("desktop_running", "running Claude Desktop", detail)
+            Some([]) => ok("desktop_running", "running Claude Desktop", "not running"),
+            Some(holding) => Check {
+                advice: "Quit Claude (Command-Q) before a switch; nothing is moved while it runs."
+                    .to_string(),
+                ..ok(
+                    "desktop_running",
+                    "running Claude Desktop",
+                    crate::holder::described_with_pids(holding),
+                )
+            },
         }
     });
     let live = &facts.live_usage;
@@ -2016,6 +2040,7 @@ fn desktop_environment(facts: &DesktopFacts) -> Value {
         "verified_against": verified,
         "version_matches": facts.version.as_deref().map(|v| v == verified),
         "support_dir": facts.support_dir,
+        "data_dir_missing": facts.data_dir_missing,
         "same_volume": facts.same_volume,
         "cookies_meta_version": facts.cookies_meta_version,
         "cookies_error": facts.cookies_error,
@@ -3591,6 +3616,7 @@ mod tests {
             installed: true,
             version: Some(crate::provider::desktop::assumptions::VERIFIED_AGAINST.into()),
             support_dir: Some(PathBuf::from("/home/x/Library/Application Support/Claude")),
+            data_dir_missing: false,
             same_volume: Some(true),
             cookies_meta_version: Some(24),
             cookies_error: None,
@@ -3857,6 +3883,46 @@ mod tests {
             level_of(&checks, "desktop_cookies_unreadable"),
             Some(Level::Fail)
         );
+    }
+
+    /// A switch treats a process list it cannot read as Claude still being open and moves
+    /// nothing, so doctor does not call that prerequisite healthy.
+    #[test]
+    fn an_unreadable_process_list_is_a_warning_doctor_says() {
+        let m = desktop_doctor("unreadable-processes");
+        m.mem.process_list_fails();
+        let facts = gather(&m.ctx);
+        assert!(facts.desktop.as_ref().unwrap().running.is_none());
+        let checks = evaluate(&facts);
+        assert_eq!(level_of(&checks, "desktop_running"), Some(Level::Warn));
+    }
+
+    /// Accounts are enrolled and Claude's data folder is gone: every switch fails before it
+    /// moves anything, so doctor says it rather than call the setup healthy.
+    #[test]
+    fn a_missing_data_folder_with_accounts_enrolled_is_a_failure_doctor_says() {
+        let m = desktop_doctor("missing-data-folder");
+        std::fs::remove_dir_all(m.support()).expect("the data folder goes");
+        let facts = gather(&m.ctx);
+        assert!(facts.desktop.as_ref().unwrap().data_dir_missing);
+        let checks = evaluate(&facts);
+        assert_eq!(
+            level_of(&checks, "desktop_data_folder_missing"),
+            Some(Level::Fail)
+        );
+
+        // Nothing enrolled and nothing waiting: a Claude that has never run is no fault.
+        let fresh = crate::switch::harness::desktop_machine("no-data-folder-no-accounts");
+        std::fs::remove_dir_all(fresh.support()).expect("the data folder goes");
+        let mut state = crate::state::load(&fresh.ctx).unwrap();
+        state
+            .accounts
+            .retain(|a| a.provider() != ProviderId::Desktop);
+        crate::state::save(&fresh.ctx, &state).unwrap();
+        let facts = gather(&fresh.ctx);
+        if let Some(desktop) = facts.desktop.as_ref() {
+            assert!(!desktop.data_dir_missing);
+        }
     }
 
     /// A Claude Desktop park is a folder, so it is checked as one and never looked up in

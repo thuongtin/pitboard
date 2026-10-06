@@ -19,6 +19,7 @@ use crate::service::Warning;
 use crate::state::{self, Key, State};
 use crate::store::tree as moves;
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 /// What kind of record this is, so one is never read as another's.
@@ -65,6 +66,11 @@ pub(super) struct TreeJournal {
     pub(super) support_dir: PathBuf,
     /// The volume it was on.
     pub(super) device: Option<u64>,
+    /// The folder itself, by its inode on that volume, where a link to it is followed. The
+    /// same path and volume can hold another folder, made again or reached by a link that
+    /// now points elsewhere.
+    #[serde(default)]
+    pub(super) support_inode: Option<u64>,
     pub(super) from_label: Option<String>,
     pub(super) from_uuid: Option<String>,
     pub(super) from_fingerprint: Option<String>,
@@ -95,6 +101,12 @@ impl TreeJournal {
                     source,
                 }
             })?),
+            support_inode: Some(std::fs::metadata(root).map(|found| found.ino()).map_err(
+                |source| Error::DesktopDataInaccessible {
+                    path: root.to_path_buf(),
+                    source,
+                },
+            )?),
             from_label: None,
             from_uuid: None,
             from_fingerprint: None,
@@ -139,6 +151,9 @@ impl TreeJournal {
         // same path, so a record that does not name it has nothing to check against.
         if self.device.is_none() {
             return Err("it does not say which volume it ran on".into());
+        }
+        if self.support_inode.is_none() {
+            return Err("it does not say which folder it ran on".into());
         }
         let from = [
             self.from_label.is_some(),
@@ -383,6 +398,18 @@ fn settle_journal(ctx: &Context, state: &mut State, journal: &TreeJournal) -> Re
     // one device. A volume that cannot be read now is no proof it is the same one.
     if let Some(recorded) = journal.device
         && ctx.host().device_of(&root).ok() != Some(recorded)
+    {
+        return Err(Error::RecoveryElsewhere {
+            tool: which,
+            from,
+            to,
+            slot: root.display().to_string(),
+        });
+    }
+    // The same path and volume can still be another folder: one deleted and made again, or a
+    // link now pointing elsewhere. A folder that cannot be read now is no proof it is the same.
+    if let Some(recorded) = journal.support_inode
+        && std::fs::metadata(&root).ok().map(|found| found.ino()) != Some(recorded)
     {
         return Err(Error::RecoveryElsewhere {
             tool: which,
@@ -922,6 +949,32 @@ mod tests {
                     .unwrap()
                     .contains("cache-made-by-claude")),
             "the keys of the login Claude made are set aside"
+        );
+    }
+
+    /// A folder deleted and made again at the same path, or a link pointed somewhere else, is
+    /// on the same volume at the same path and is not the folder the run moved items of.
+    #[test]
+    fn a_data_folder_made_again_at_the_same_path_is_left_alone() {
+        let m = desktop_machine("remade-folder");
+        assert_eq!(
+            m.crash_at("tree.item_parked").unwrap_err(),
+            "tree.item_parked"
+        );
+        let aside = m.support().with_file_name("Claude-aside");
+        std::fs::rename(m.support(), &aside).unwrap();
+        std::fs::create_dir(m.support()).unwrap();
+        let refused = super::super::settle(&m.ctx, Some(ProviderId::Desktop))
+            .err()
+            .expect("another folder at the same path");
+        assert!(
+            matches!(refused, Error::RecoveryElsewhere { .. }),
+            "{refused:?}"
+        );
+        assert!(pending(&m.ctx).is_some(), "the record is kept");
+        assert!(
+            std::fs::read_dir(m.support()).unwrap().next().is_none(),
+            "nothing was put into the other folder"
         );
     }
 

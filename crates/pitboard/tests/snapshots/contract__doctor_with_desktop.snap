@@ -8,6 +8,7 @@ expression: "value[\"data\"][\"environment\"][\"desktop\"]"
   "verified_against": "2.19675.0",
   "version_matches": null,
   "support_dir": "[path]",
+  "data_dir_missing": false,
   "same_volume": true,
   "cookies_meta_version": 24,
   "cookies_error": null,

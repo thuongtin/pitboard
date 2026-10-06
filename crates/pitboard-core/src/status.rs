@@ -648,6 +648,7 @@ fn ask_folder(
     root: &Path,
     account: &Account,
     parked: Option<&Park>,
+    expected_session: Option<&str>,
     remembered: Option<&Snapshot>,
     fresh: bool,
 ) -> Asked {
@@ -665,7 +666,7 @@ fn ask_folder(
     {
         return (Err(Stale::ParkUnreadable), None);
     }
-    let answer = live_usage::ask(ctx, root, account);
+    let answer = live_usage::ask(ctx, root, account, expected_session);
     let outcome = match &answer {
         Ok(_) => Some(budget::Outcome::Answered),
         // claude.ai's answer is read before it reaches here, and what it asked to wait is
@@ -727,6 +728,7 @@ fn ask_tree(
         &root,
         &account,
         None,
+        Some(&live.fingerprint),
         remembered.get(&account.usage_key()),
         fresh,
     );
@@ -1010,6 +1012,7 @@ pub fn gather(ctx: &Context, state: &State, fresh: bool) -> Report {
                             root,
                             account,
                             account.parked.as_ref(),
+                            None,
                             remembered.get(&account.usage_key()),
                             fresh,
                         ),
@@ -2697,7 +2700,7 @@ mod tests {
         manifest["account_uuid"] = json!("someone-else");
         std::fs::write(&manifest_file, manifest.to_string()).unwrap();
 
-        let (answer, learned) = ask_folder(&ctx, &dir, &there, Some(&park), None, true);
+        let (answer, learned) = ask_folder(&ctx, &dir, &there, Some(&park), None, None, true);
         assert_eq!(answer.unwrap_err(), Stale::ParkUnreadable);
         assert!(learned.is_none());
         assert_eq!(api.calls(), 0, "nobody was asked");

@@ -274,6 +274,7 @@ When Codex's checks appear and Claude Code is absent, `doctor` leaves out most o
   | `desktop_cookies` | `Claude Desktop cookies` | The version of Claude's cookie database is one Pitboard reads. |
   | `desktop_format_unknown` | `Claude Desktop cookies` | In place of `desktop_cookies` when the version is another. Always fails. |
   | `desktop_cookies_unreadable` | `Claude Desktop cookies` | In place of `desktop_cookies` when the cookie database is there and cannot be read. Fails, or warns while Claude is open and may be writing it. |
+  | `desktop_data_folder_missing` | `Claude Desktop data` | Only when an account is enrolled or a switch waits and Claude's data folder is gone. Always fails. |
   | `desktop_different_volume` | `Claude Desktop volume` | Only when Claude's data folder and Pitboard's parks are on different volumes. Always fails. |
   | `desktop_parks_not_private` | `Claude Desktop parks` | Only when others can reach the directory holding Claude Desktop parks. Always fails. |
   | `desktop_orphan_park` | `Claude Desktop parks` | Only when a Claude Desktop park is named by no account. Always warns. |
@@ -282,7 +283,7 @@ When Codex's checks appear and Claude Code is absent, `doctor` leaves out most o
   | `desktop_park_expired` | `account desktop/<label>` | In place of `desktop_parked_login` when the sign-in has lapsed. Always warns. |
   | `desktop_strays_kept` | `Claude Desktop strays` | Only when a switch set files aside, with how many and their size. Always `ok`. |
   | `desktop_recovery_pending` | `interrupted Claude Desktop switch` | Only when a Claude Desktop switch did not finish. Always warns. |
-  | `desktop_running` | `running Claude Desktop` | What runs from `Claude.app`, with process IDs. Always `ok`. |
+  | `desktop_running` | `running Claude Desktop` | What runs from `Claude.app`, with process IDs. Warns when the process list cannot be read, and `ok` otherwise. |
   | `desktop_live_usage` | `Claude Desktop live usage` | Whether live usage is on. |
   | `desktop_live_usage_needs_approval` | `Claude Desktop live usage` | In place of `desktop_live_usage` when it is on and macOS has not let Pitboard read Claude's key. Always warns. |
   | `desktop_session_twins_differ` | `Claude Desktop session` | Only when Claude's two copies of the session cookie differ. Always `ok`. |
