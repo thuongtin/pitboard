@@ -11,6 +11,10 @@ the menu bar app quits Claude around a switch and opens it again.
 
 ### Added
 
+- **Open Claude Code** shows the selected Desktop account and the upcoming Terminal,
+  macOS permission and account verification steps before **Open Terminal** starts it.
+  After dispatch, the dialog directs you to continue in Terminal; a refused or cancelled
+  request keeps the preparation visible so you can try again.
 - **Open Claude Code** on a named Desktop account opens a Code session in Terminal without
   another browser sign-in. `pitboard desktop code <label>` does the same. Pitboard verifies
   the account and organisation before starting Code and passes only the existing access

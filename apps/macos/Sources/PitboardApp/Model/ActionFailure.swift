@@ -52,6 +52,8 @@ public enum AccountSheet: Identifiable, Equatable, Sendable {
     /// Live usage for Claude Desktop, which reads Claude's key and so can make macOS ask
     /// for the login password: said first, and turned on only from this sheet.
     case liveUsage
+    /// Prepare for the Terminal and keychain prompts before starting a Desktop Code session.
+    case desktopCode(label: String)
 
     public var id: String {
         switch self {
@@ -60,6 +62,7 @@ public enum AccountSheet: Identifiable, Equatable, Sendable {
         case .name(let provider, _): "name/\(provider)"
         case .rename(let provider, let label): "rename/\(provider)/\(label)"
         case .liveUsage: "liveUsage"
+        case .desktopCode(let label): "desktopCode/\(label)"
         }
     }
 }
