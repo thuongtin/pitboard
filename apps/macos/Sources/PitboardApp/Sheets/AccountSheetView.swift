@@ -30,6 +30,8 @@ struct AccountSheetView: View {
             RenameSheet(model: model, provider: provider, label: label)
         case .liveUsage:
             LiveUsageSheet(model: model)
+        case .desktopCode(let label):
+            DesktopCodeSheet(model: model, label: label)
         }
     }
 }

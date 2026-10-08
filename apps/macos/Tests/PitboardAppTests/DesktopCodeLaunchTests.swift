@@ -109,7 +109,9 @@ private struct DesktopCodeHelper {
 @Test func desktopCodeIsGivenAbsolutePathsForRelativeOverrides() {
     let tool = CommandLineTool(
         home: "/tmp/fixture home",
-        environment: ["PITBOARD_HOME": "scratch/state", "PITBOARD_CLAUDE_DESKTOP_DIR": "scratch/data"],
+        environment: [
+            "PITBOARD_HOME": "scratch/state", "PITBOARD_CLAUDE_DESKTOP_DIR": "scratch/data",
+        ],
         execute: { _ in nil })
     let here = FileManager.default.currentDirectoryPath
     #expect(tool.codeEnvironment["PITBOARD_HOME"] == "\(here)/scratch/state")
@@ -252,4 +254,90 @@ private final class Overlap: @unchecked Sendable {
     async let second = tool.openDesktopCode(label: "second")
     _ = await (first, second)
     #expect(overlap.most == 1)
+}
+
+/// Asking to open Code first explains what happens; Terminal waits for the person's action.
+@MainActor
+@Test func desktopCodeShowsPreparationBeforeOpeningTerminal() async throws {
+    let helper = try DesktopCodeHelper()
+    defer { helper.remove() }
+    let scripts = Scripts()
+    let fixture = Fixture.claudeDesktop.dependencies(defaults: TestDefaults())
+    let model = AppModel(
+        testing: fixture.core, commandLineTool: helper.tool(scripts.run),
+        appControl: fixture.appControl)
+    await model.refresh()
+
+    await model.openDesktopCode(label: "work")
+
+    #expect(scripts.ran.isEmpty, "Terminal waits until the person is ready")
+    #expect(model.sheet?.id == "desktopCode/work")
+    #expect(model.requestedPane == .accounts)
+}
+
+/// Dismissing preparation or asking without it cannot dispatch the Terminal command.
+@MainActor
+@Test func desktopCodeCancelledPreparationDoesNotLaunch() async throws {
+    let helper = try DesktopCodeHelper()
+    defer { helper.remove() }
+    let scripts = Scripts()
+    let fixture = Fixture.claudeDesktop.dependencies(defaults: TestDefaults())
+    let model = AppModel(
+        testing: fixture.core, commandLineTool: helper.tool(scripts.run),
+        appControl: fixture.appControl)
+    await model.openDesktopCode(label: "work")
+    model.sheet = nil
+
+    #expect(await model.desktopCodeLaunchAsked(label: "work") != nil)
+    #expect(scripts.ran.isEmpty)
+}
+
+/// Confirmation dispatches only the selected account; the sheet stays to explain the handoff.
+@MainActor
+@Test func desktopCodeConfirmationLaunchesThePreparedAccount() async throws {
+    let helper = try DesktopCodeHelper()
+    defer { helper.remove() }
+    let scripts = Scripts()
+    let fixture = Fixture.claudeDesktop.dependencies(defaults: TestDefaults())
+    let model = AppModel(
+        testing: fixture.core, commandLineTool: helper.tool(scripts.run),
+        appControl: fixture.appControl)
+    await model.openDesktopCode(label: "personal")
+    #expect(await model.desktopCodeLaunchAsked(label: "work") != nil)
+    #expect(scripts.ran.isEmpty)
+
+    #expect(await model.desktopCodeLaunchAsked(label: "personal") == nil)
+    #expect(
+        scripts.ran == [
+            CommandLineTool.script(openingDesktopCode: helper.path, label: "personal")
+        ])
+    #expect(model.sheet == .desktopCode(label: "personal"))
+}
+
+/// A macOS refusal or cancellation returns to preparation rather than reporting a handoff.
+@MainActor
+@Test(arguments: [false, true])
+func desktopCodeDispatchFailureKeepsPreparation(cancelled: Bool) async throws {
+    let helper = try DesktopCodeHelper()
+    defer { helper.remove() }
+    let fixture = Fixture.claudeDesktop.dependencies(defaults: TestDefaults())
+    let model = AppModel(
+        testing: fixture.core,
+        commandLineTool: helper.tool { _ in
+            [
+                NSAppleScript.errorNumber: cancelled ? -128 : -1743,
+                NSAppleScript.errorMessage: "Terminal refused the command.",
+            ]
+        }, appControl: fixture.appControl)
+    await model.openDesktopCode(label: "work")
+
+    let failure = try #require(await model.desktopCodeLaunchAsked(label: "work"))
+    #expect(failure.title == (cancelled ? "Terminal wasn’t opened" : "Couldn’t open Terminal"))
+    if cancelled {
+        #expect(failure.message.contains("Choose Open Terminal"))
+    } else {
+        #expect(failure.message == "Terminal refused the command.")
+    }
+    #expect(model.sheet == .desktopCode(label: "work"))
+    #expect(model.presentedFailure == nil)
 }

@@ -699,7 +699,7 @@ public final class AppModel {
         switch sheet {
         case .add(let code): code ?? addable.first?.code ?? defaultProvider
         case .signInAgain(let code, _), .name(let code, _), .rename(let code, _): code
-        case .liveUsage: desktopProvider
+        case .liveUsage, .desktopCode: desktopProvider
         }
     }
 
@@ -1439,7 +1439,7 @@ extension AppModel {
             if code == desktopProvider { sheet = nil }
         case .signInAgain(let code, _), .name(let code, _):
             if code == desktopProvider { sheet = nil }
-        case .rename, .liveUsage:
+        case .rename, .liveUsage, .desktopCode:
             break
         }
     }
@@ -1501,13 +1501,34 @@ extension AppModel {
         present(.liveUsage)
     }
 
-    /// Opens the helper in Terminal; access grants stay inside the helper and Code.
+    /// Explains the upcoming prompts before the person asks to open Terminal.
     func openDesktopCode(label: String) async {
         guard switchUnderWay == nil, signingIn == nil else { return }
-        if case .failed(let message) = await machine.commandLineTool.openDesktopCode(
-            label: label)
-        {
-            present(ActionFailure("Couldn’t open Claude Code", message: message))
+        present(.desktopCode(label: label))
+    }
+
+    /// Only the preparation sheet's explicit action starts Terminal. Dispatching its command
+    /// says nothing about whether the helper has verified the account or started Code yet.
+    func desktopCodeLaunchAsked(label: String) async -> ActionFailure? {
+        guard switchUnderWay == nil, signingIn == nil else {
+            return ActionFailure(
+                "Wait for the account operation",
+                message: "Finish switching or signing in before opening Terminal.")
+        }
+        guard sheet == .desktopCode(label: label) else {
+            return ActionFailure(
+                "Prepare to open Claude Code",
+                message: "Choose Open Claude Code on the account you want to use first.")
+        }
+        switch await machine.commandLineTool.openDesktopCode(label: label) {
+        case .linked:
+            return nil
+        case .cancelled:
+            return ActionFailure(
+                "Terminal wasn’t opened",
+                message: "The request was cancelled. Choose Open Terminal when you are ready.")
+        case .failed(let message):
+            return ActionFailure("Couldn’t open Terminal", message: message)
         }
     }
 
